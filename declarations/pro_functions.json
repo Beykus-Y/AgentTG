@@ -1,0 +1,332 @@
+[
+  {
+    "name": "send_telegram_message",
+    "description": "[CRITICAL] Sends a text message to the user in the current chat. Use this function for ALL textual communication directed at the user. This includes greetings, responses to queries, reporting results (success or failure) of other tool calls, asking clarifying questions, requesting confirmation, providing any information, or indicating errors. Do NOT assume implicit communication; explicitly use this tool to speak.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "text": {
+          "type": "STRING",
+          "description": "The content of the message to send to the user. Must be plain text."
+        },
+        "delay_seconds": {
+          "type": "INTEGER",
+          "description": "(Optional) Delay in seconds before sending the message. Useful for creating pauses or simulating thought."
+        }
+      },
+      "required": ["text"]
+    }
+  },
+  {
+    "name": "find_user_id",
+    "description": "[ESSENTIAL] Searches the database for a user's unique ID (`user_id`) based on their first name or username (e.g., 'John Doe' or '@johndoe'). Returns the user_id if found. This is often necessary before using functions that require a specific user_id like `remember_user_info` or `reading_user_info` when targeting someone other than the current user.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "query": {
+          "type": "STRING",
+          "description": "The user's first name or username to search for. The '@' symbol is optional for usernames."
+        }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "remember_user_info",
+    "description": "[MEMORY] Saves or updates a piece of information (a note or fact) about ANY user in the persistent database, identified by their `user_id`. If the current user's ID is provided, saves info about them. If another user's ID is provided, saves info about that user. Use this to store preferences, facts, reminders, etc.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "user_id": {
+          "type": "INTEGER",
+          "description": "The unique ID of the user for whom the information is being saved."
+        },
+        "info_category": {
+          "type": "STRING",
+          "description": "A category for the information (e.g., 'hobby', 'location', 'reminder', 'preferred_language'). Acts like a key."
+        },
+        "info_value": {
+          "type": "STRING",
+          "description": "The actual information to store. Can be plain text or a JSON string for lists/dictionaries (e.g., '\"Loves hiking\"', '[\"python\", \"javascript\"]', '{\"city\": \"London\", \"country\": \"UK\"}'). Ensure JSON strings are valid."
+        },
+        "merge_lists": {
+          "type": "BOOLEAN",
+          "description": "(Optional) If True (default) and `info_value` is a JSON list/dictionary, attempts to merge with existing data in that category instead of overwriting. If False, overwrites."
+        }
+      },
+      "required": ["user_id", "info_category", "info_value"]
+    }
+  },
+  {
+    "name": "reading_user_info",
+    "description": "[MEMORY] Retrieves all known information (profile data + stored notes/facts from `remember_user_info`) about ANY user, identified by their `user_id`.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "user_id": {
+          "type": "INTEGER",
+          "description": "The unique ID of the user whose information needs to be retrieved."
+        }
+      },
+      "required": ["user_id"]
+    }
+  },
+  {
+    "name": "forget_user_info",
+    "description": "[MEMORY] Deletes specific stored information (a note/fact) about ANY user from the database, identified by `user_id`. Can delete an entire category, a specific key within a JSON dictionary category, or a specific item within a JSON list category.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "user_id": {
+          "type": "INTEGER",
+          "description": "The unique ID of the user whose information needs to be deleted."
+        },
+        "info_category": {
+          "type": "STRING",
+          "description": "The category of information to delete from."
+        },
+        "key": {
+          "type": "STRING",
+          "description": "(Optional) If the `info_category` stores a JSON dictionary, specify the key to remove."
+        },
+        "list_item": {
+          "type": "STRING",
+          "description": "(Optional) If the `info_category` stores a JSON list, specify the exact string value of the item to remove."
+        }
+      },
+      "required": ["user_id", "info_category"]
+    }
+  },
+  {
+      "name": "execute_terminal_command_in_env",
+      "description": "[POWERFUL ENV TOOL] Executes a raw shell command within the user's chat environment's terminal (working directory). Use cautiously for essential file system operations like listing files (`ls -la`), checking the current directory (`pwd`), reading small files (`cat filename.txt`), creating directories (`mkdir dirname`), checking disk usage (`df -h`), etc. Avoid potentially harmful or long-running commands (e.g., `rm -rf`, network scans, complex scripts) unless absolutely necessary and confirmed. Admins might have elevated permissions to operate in other chat directories. The command runs directly as provided.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "command": {
+            "type": "STRING",
+            "description": "The shell command to execute (e.g., 'ls -la work_files/', 'pwd', 'cat config.json')."
+          }
+        },
+        "required": ["command"]
+      }
+  },
+  {
+    "name": "read_file_from_env",
+    "description": "[ENV TOOL] Reads the entire content of a specified file from the chat's environment storage and returns it as a string. Useful for accessing notes, data files, code, configuration, etc. Specify the full path if needed. Admins might be able to read files from other chat directories (e.g., using paths like '-100.../file.txt').",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "filename": {
+          "type": "STRING",
+          "description": "Path to the file to read (e.g., 'my_notes.txt', 'data/input.csv', '../shared/config.yaml', '-100123456789/script.py')."
+        }
+      },
+      "required": ["filename"]
+    }
+  },
+  {
+    "name": "write_file_to_env",
+    "description": "[ENV TOOL] Writes (or overwrites) the given text content to a specified file in the chat's environment storage. Useful for saving notes, results, generated code, configuration, etc. Ensure the content is appropriate for the file type. Admins might have permissions to write files in other chat directories.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "filename": {
+          "type": "STRING",
+          "description": "Path and name of the file to write to (e.g., 'results.txt', 'output/data.json', 'script.py')."
+        },
+        "content": {
+          "type": "STRING",
+          "description": "The full text content to write into the file."
+        }
+      },
+      "required": ["filename", "content"]
+    }
+  },
+  {
+    "name": "edit_file_content",
+    "description": "[ENV TOOL] Edits a text file within the chat environment by replacing ALL occurrences of a specific string with another string. Useful for simple bulk replacements in configuration files or text documents. Admins might have permissions to edit files in other chat directories.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "filename": {
+          "type": "STRING",
+          "description": "Path to the file to edit."
+        },
+        "search_string": {
+          "type": "STRING",
+          "description": "The exact string to find within the file."
+        },
+        "replace_string": {
+          "type": "STRING",
+          "description": "The string to replace each occurrence of `search_string` with."
+        }
+      },
+      "required": ["filename", "search_string", "replace_string"]
+    }
+  },
+  {
+    "name": "edit_json_file",
+    "description": "[ENV TOOL] Edits a specific value within a JSON file in the chat environment using a JSONPath expression. Reads the JSON, modifies the value at the specified path, and overwrites the file. Admins might have permissions to edit files in other chat directories.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "filename": {
+          "type": "STRING",
+          "description": "Path to the JSON file (.json) to edit."
+        },
+        "json_path": {
+          "type": "STRING",
+          "description": "JSONPath expression to locate the value to modify (e.g., '$.user.name', '$.items[0].price', '$.config.settings.enabled'). Use single quotes or escaped double quotes inside the path if needed for keys with special characters: '$.user[\"first-name\"]'."
+        },
+        "new_value_json": {
+          "type": "STRING",
+          "description": "The new value to set, formatted as a valid JSON string (e.g., '\"New Name\"', '123.45', 'true', '[\"a\", \"b\"]', '{\"new_key\": \"new_value\"}'). String values inside JSON MUST use double quotes."
+        }
+      },
+      "required": ["filename", "json_path", "new_value_json"]
+    }
+  },
+   {
+    "name": "create_file_in_env",
+    "description": "[ENV TOOL] Creates a new, empty file at the specified path in the chat's environment storage. Useful for initializing log files, scripts, or data files before writing to them. Fails if the file already exists. Admins might have permissions to create files in other chat directories.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "filename": {
+          "type": "STRING",
+          "description": "Path and name for the new file to create (e.g., 'new_log.txt', 'scripts/init.py')."
+        }
+      },
+      "required": ["filename"]
+    }
+  },
+  {
+    "name": "execute_python_script_in_env",
+    "description": "[ENV TOOL] Executes a Python script (.py file) located within the chat's environment storage. The script runs within the context of the environment. Use this to perform complex logic, data processing, or automation tasks defined in a Python file. Ensure the script exists and is safe to run. Admins might have permissions to execute scripts from other chat directories.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "filename": {
+          "type": "STRING",
+          "description": "Path to the Python script file (.py) to execute (e.g., 'process_data.py', 'utils/helper.py')."
+        }
+      },
+      "required": ["filename"]
+    }
+  },
+  {
+    "name": "refine_text_with_deep_search",
+    "description": "[ADVANCED CONTENT] Use this tool for in-depth research on a topic or significantly improving existing text. It performs web searches to gather information, then uses multiple AI steps to generate clarifying questions, find answers, and synthesize a comprehensive final report or refined text. Suitable for complex queries or when high-quality, detailed output is required.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "initial_query_or_text": {
+          "type": "STRING",
+          "description": "The initial topic query (e.g., 'Explain quantum computing') or the existing text passage to be improved and expanded upon."
+        },
+        "max_iterations": {
+          "type": "INTEGER",
+          "description": "(Optional) Maximum number of research/refinement iterations (default is 3). More iterations lead to deeper research but take longer."
+        }
+      },
+      "required": ["initial_query_or_text"]
+    }
+  },
+  {
+    "name": "get_current_weather",
+    "description": "[EXTERNAL DATA] Fetches the current weather conditions for a specified location.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "location": {
+          "type": "STRING",
+          "description": "The city or location name (e.g., 'Moscow', 'London, UK', 'San Francisco, CA'). Be specific for better accuracy."
+        },
+        "unit": {
+          "type": "STRING",
+          "description": "Temperature unit: 'celsius' or 'fahrenheit'. Defaults to 'celsius'."
+        }
+      },
+      "required": ["location"]
+    }
+  },
+  {
+    "name": "get_stock_price",
+    "description": "[EXTERNAL DATA] Retrieves the current price for a publicly traded stock using its ticker symbol.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "ticker_symbol": {
+          "type": "STRING",
+          "description": "The stock's ticker symbol (e.g., 'GOOGL', 'AAPL', 'MSFT', 'YNDX.ME'). Ensure the correct symbol for the market."
+        }
+      },
+      "required": ["ticker_symbol"]
+    }
+  },
+   {
+    "name": "get_music_charts",
+    "description": "[EXTERNAL DATA] Fetches top music tracks from a specified chart source (e.g., Yandex.Music).",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "source": {
+          "type": "STRING",
+          "description": "The source of the music chart (e.g., 'yandex'). Check available sources."
+        },
+        "limit": {
+          "type": "INTEGER",
+          "description": "Maximum number of tracks to return (default 10)."
+        }
+      },
+      "required": ["source"]
+    }
+  },
+  {
+    "name": "send_file_from_env",
+    "description": "[ENV TOOL] Sends a specified file from the chat's environment storage directly to the user in the current chat. Use this to provide requested files, logs, script outputs, etc. Admins might be able to send files from other chat directories.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "filename": {
+          "type": "STRING",
+          "description": "Path to the file within the environment storage to send (e.g., 'results.txt', 'logs/debug.log', '../shared_data/report.pdf')."
+        }
+      },
+      "required": ["filename"]
+    }
+  },
+  {
+    "name": "get_avatar_description",
+    "description": "[USER INFO] Retrieves a textual description of a user's avatar (profile picture). It first checks if a description was previously generated and saved. If not, it may trigger a request to generate a new description using a vision model (if available and feasible).",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "user_id": {
+          "type": "INTEGER",
+          "description": "The unique ID of the user whose avatar description is needed."
+        }
+      },
+      "required": ["user_id"]
+    }
+  },
+  {
+    "name": "generate_image_description",
+    "description": "[VISION TOOL] Generates a textual description for a given image. This tool is primarily used internally by other functions like `get_avatar_description` when a description needs to be created on-demand. It requires the image data itself.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "image_bytes": {
+          "type": "STRING",
+          "description": "The image encoded as a Base64 string. Do not call this directly unless you have the image bytes."
+        },
+         "prompt": {
+            "type": "STRING",
+            "description": "(Optional) A specific prompt or context to guide the description generation (e.g., 'Focus on the main subject', 'Describe the style')."
+          }
+      },
+      "required": ["image_bytes"]
+    }
+  }
+]
