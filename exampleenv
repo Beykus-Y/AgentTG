@@ -1,0 +1,72 @@
+# .env Example File for Advanced Gemini Telegram Bot Agent
+# Скопируйте этот файл в .env и заполните своими значениями
+
+# --- КРИТИЧЕСКИ ВАЖНЫЕ ПЕРЕМЕННЫЕ ---
+# Токен вашего Telegram бота (полученный от @BotFather)
+BOT_TOKEN=1234567890:ABCdefGhIJKlmNOpqRsTuVWxyz123456789
+# Ваш API ключ для Google AI (Gemini API). Получите его на https://aistudio.google.com/app/apikey
+GOOGLE_API_KEY=AIzaSyB...YourGoogleApiKeyHere...xyz
+# Список ID администраторов бота через запятую (БЕЗ пробелов вокруг запятых)
+ADMIN_IDS=12345678,987654321
+
+# --- Пути (Необязательно, есть значения по умолчанию в config.py) ---
+# Путь к файлу базы данных SQLite (относительно Agent/)
+# DB_PATH=database/my_custom_bot_db.sqlite
+# Путь к корневой директории для окружений чатов (относительно Agent/)
+# ENV_DIR_PATH=environments
+
+# --- Настройки AI Моделей (Необязательно, есть значения по умолчанию) ---
+# Имя Lite-модели Gemini
+LITE_GEMINI_MODEL_NAME=gemini-1.5-flash-latest
+# Имя Pro-модели Gemini
+PRO_GEMINI_MODEL_NAME=gemini-1.5-flash-latest
+# Параметры генерации для Lite (JSON строка)
+# LITE_GENERATION_CONFIG='{"temperature": 0.3, "top_p": 0.9}'
+# Параметры генерации для Pro (JSON строка)
+# PRO_GENERATION_CONFIG='{"temperature": 0.75, "top_k": 40}'
+# Настройки безопасности для Lite (JSON строка со списком словарей)
+# LITE_SAFETY_SETTINGS='[{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_LOW_AND_ABOVE"}]'
+# Настройки безопасности для Pro (JSON строка со списком словарей)
+# PRO_SAFETY_SETTINGS='[{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}]'
+
+# --- Настройки Function Calling (Необязательно, есть значения по умолчанию) ---
+# Глобальное включение/выключение Function Calling ('true' или 'false')
+FC_ENABLED=true
+# Макс. шагов FC для Lite (даже если FC_ENABLED=false, это значение хранится)
+MAX_LITE_FC_STEPS=1
+# Макс. шагов FC для Pro
+MAX_PRO_FC_STEPS=10
+
+# --- Настройки Бота и Интерфейса (Необязательно) ---
+# Таймаут ожидания ответа от AI (в секундах)
+# AI_TIMEOUT=60
+# Максимальная длина сообщения в Telegram (близко к лимиту TG)
+# MAX_MESSAGE_LENGTH=4000
+# Макс. количество пар сообщений (user+model) в истории для контекста
+# MAX_HISTORY_LENGTH=15
+
+# --- Лимиты Инструментов (Необязательно) ---
+# Макс. размер файла для чтения инструментом (в байтах)
+# MAX_READ_SIZE_BYTES=200000 # 200 KB
+# Макс. размер файла для записи инструментом (в байтах)
+# MAX_WRITE_SIZE_BYTES=500000 # 500 KB
+# Таймаут выполнения Python скриптов (в секундах)
+# SCRIPT_TIMEOUT_SECONDS=60
+# Таймаут выполнения команд терминала (в секундах)
+# COMMAND_TIMEOUT_SECONDS=90
+# Макс. длина вывода скрипта/команды для логов и контекста
+# MAX_SCRIPT_OUTPUT_LEN=8000
+# MAX_COMMAND_OUTPUT_LEN=8000
+
+# --- Сервис Новостей (RSS) ---
+# Здесь указываются URL для категорий, определенных в config.py
+# Имена переменных должны совпадать с теми, что используются в os.getenv() в config.py
+RSS_TECH_1=https://example.com/rss/tech_feed_1.xml
+RSS_TECH_2=https://another.example.org/tech_news.rss
+RSS_SCIENCE_1=https://science-example.net/feed.xml
+# Добавьте другие RSS по аналогии для других категорий...
+# RSS_CATEGORY_KEY=URL
+
+# --- Общие ---
+# Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+LOG_LEVEL=INFO
