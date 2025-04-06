@@ -13,7 +13,7 @@ tool_module_paths = [
     ".basic_tools",
     ".communication_tools",
     ".user_data_tools",
-    ".environment_tools",
+    #.environment_tools",
     ".deep_search_tool",
     ".meta_tools"
 ]
