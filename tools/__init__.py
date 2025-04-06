@@ -39,6 +39,7 @@ for module_path in tool_module_paths:
         logger.debug(f"Processing tool module: {module_path}")
 
         for func_name, func_obj in module.__dict__.items():
+            logger.debug(f"Checking item from {module_path}: name='{func_name}', is_coroutine={asyncio.iscoroutinefunction(func_obj)}")
             # <<< ИЗМЕНЕНО: Условие регистрации >>>
             if (asyncio.iscoroutinefunction(func_obj) and
                     not func_name.startswith('_') and
