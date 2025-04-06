@@ -10,7 +10,7 @@ try:
     # Импортируем утилиты
     from utils.helpers import escape_markdown_v2
     # Используем абсолютный импорт от корня проекта для utils
-    from utils.converters import _deserialize_parts, reconstruct_content_object # Убираем неиспользуемые импорты
+    from utils.converters import _deserialize_parts, reconstruct_content_object, _convert_part_to_dict
 except ImportError as e:
     logging.critical(f"CRITICAL: Failed to import core dependencies in history_manager: {e}", exc_info=True)
     # В реальном приложении здесь может быть выход или обработка ошибки
