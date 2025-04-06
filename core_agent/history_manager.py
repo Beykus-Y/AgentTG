@@ -10,7 +10,7 @@ try:
     # Импортируем утилиты
     from utils.helpers import escape_markdown_v2
     # Используем абсолютный импорт от корня проекта для utils
-    from utils.converters import gemini_history_to_dict_list, _convert_part_to_dict, _deserialize_parts, reconstruct_content_object
+    from utils.converters import _deserialize_parts, reconstruct_content_object # Убираем неиспользуемые импорты
 except ImportError as e:
     logging.critical(f"CRITICAL: Failed to import core dependencies in history_manager: {e}", exc_info=True)
     # В реальном приложении здесь может быть выход или обработка ошибки
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Константа для обрезки вывода логов в истории
 MAX_LOG_CONTEXT_LEN = 200
-MAX_FULL_RESULT_PREVIEW = 500 
+MAX_FULL_RESULT_PREVIEW = 500
 # --- Функция подготовки истории ---
 async def prepare_history(
     chat_id: int,
@@ -46,11 +46,12 @@ async def prepare_history(
     """
     Получает историю из БД, заметки/профиль пользователя, недавние логи выполнения,
     форматирует историю для модели (префиксы, очистка FC/FR).
-    Очищает FunctionCall из сообщений модели перед возвратом.
+    *** Добавлена логика для пропуска последнего текстового сообщения модели,
+        если оно следует сразу за сообщением модели с FC/FR, чтобы предотвратить зацикливание API. ***
 
     Возвращает:
-        - prepared_history_objects: Список объектов google.ai.generativelanguage.Content для model.start_chat().
-        - original_history_len_for_save: Исходная длина истории из БД (для расчета новых сообщений).
+        - final_history_for_api: Список объектов google.ai.generativelanguage.Content для model.start_chat().
+        - original_db_len: Исходная длина истории из БД (для расчета новых сообщений).
     """
     logger.debug(f"Preparing history for chat={chat_id}, current_user={user_id}, chat_type={chat_type}, add_notes={add_notes}, add_logs={add_recent_logs}, log_limit={recent_logs_limit}")
 
@@ -59,9 +60,11 @@ async def prepare_history(
     user_profile: Optional[Dict[str, Any]] = None
     user_notes: Dict[str, Any] = {}
     recent_logs: List[Dict[str, Any]] = []
+    original_db_len: int = 0 # Инициализируем
     try:
         # Получаем историю в виде словарей (как она хранится в БД)
         history_from_db = await database.get_chat_history(chat_id) # Ожидаем List[Dict]
+        original_db_len = len(history_from_db) # <<< ЗАПОМИНАЕМ ОРИГИНАЛЬНУЮ ДЛИНУ ЗДЕСЬ
         if add_notes:
             user_profile = await database.get_user_profile(user_id)
             user_notes = await database.get_user_notes(user_id, parse_json=True)
@@ -69,20 +72,59 @@ async def prepare_history(
             recent_logs = await database.get_recent_tool_executions(chat_id, limit=recent_logs_limit)
     except Exception as db_err:
         logger.error(f"DB error during history/profile/notes/logs fetch for chat={chat_id}, user={user_id}: {db_err}", exc_info=True)
+        # original_db_len остается 0, если была ошибка
+
+    # <<< НАЧАЛО НОВОГО БЛОКА ФИЛЬТРАЦИИ >>>
+    history_to_process = history_from_db # По умолчанию обрабатываем всю историю
+    skip_last_model_text = False
+
+    if len(history_from_db) >= 2:
+        last_entry = history_from_db[-1]
+        second_last_entry = history_from_db[-2]
+
+        # Проверяем, что последние два сообщения - от модели
+        if last_entry.get("role") == "model" and second_last_entry.get("role") == "model":
+            # Проверяем, содержал ли предпоследний ответ FC или FR
+            second_last_parts = second_last_entry.get("parts", [])
+            second_last_had_fc_fr = any(
+                isinstance(part, dict) and ('function_call' in part or 'function_response' in part)
+                for part in second_last_parts
+            )
+
+            # Проверяем, содержит ли последний ответ ТОЛЬКО текст (и текст не пустой)
+            last_parts = last_entry.get("parts", [])
+            last_has_only_text = False
+            if last_parts and all(isinstance(part, dict) for part in last_parts):
+                 last_has_only_text = (
+                     all('text' in part and not ('function_call' in part or 'function_response' in part)
+                         for part in last_parts)
+                     and any(part.get('text') for part in last_parts) # Убедимся, что текст НЕ пустой
+                 )
+
+            if second_last_had_fc_fr and last_has_only_text:
+                skip_last_model_text = True
+                logger.info("History Prep Filter: Skipping last model's text-only message after FC/FR to prevent potential API loop.")
+                history_to_process = history_from_db[:-1] # Используем историю БЕЗ последнего сообщения для API
+            else:
+                 logger.debug(f"History Prep Filter: Pattern not matched. second_last_had_fc_fr={second_last_had_fc_fr}, last_has_only_text={last_has_only_text}")
+        else:
+             logger.debug("History Prep Filter: Last two entries are not both 'model'.")
+    # <<< КОНЕЦ НОВОГО БЛОКА ФИЛЬТРАЦИИ >>>
 
     # 2. Формирование истории для модели (список объектов Content)
     prepared_history_objects: List[Content] = []
 
     # --- Добавляем блок RAG (недавние логи) ---
     if add_recent_logs and recent_logs:
-        # ... (код форматирования логов остается без изменений) ...
         logs_str_parts = ["\\~\\~\\~Недавние Выполненные Действия\\~\\~\\~"]
         added_log_count = 0
         for log_entry in reversed(recent_logs):
+            # ... (остальной код форматирования логов) ...
             tool_name = log_entry.get('tool_name', 'unknown_tool')
             if tool_name == 'send_telegram_message':
                 logger.debug(f"History Prep: Skipping log entry for tool '{tool_name}' (communication tool).")
                 continue
+            # ... (остальной код форматирования) ...
             log_line_parts = []
             ts = log_entry.get('timestamp', 'N/A').split('.')[0]
             status = log_entry.get('status', 'unknown')
@@ -142,7 +184,6 @@ async def prepare_history(
 
     # --- Добавляем контекст пользователя (профиль + заметки) ---
     if add_notes:
-        # ... (код форматирования профиля и заметок остается без изменений) ...
         user_data_str_parts = []
         context_added = False
         if user_profile:
@@ -177,13 +218,11 @@ async def prepare_history(
              except Exception as context_err:
                  logger.error(f"Failed to create Content object for user context: {context_err}", exc_info=True)
 
-    # --- Добавляем историю сообщений из БД ---
-    original_db_len = len(history_from_db) # Запоминаем ДО обработки
+    # --- Добавляем историю сообщений из БД (ИЗ ОТФИЛЬТРОВАННОГО СПИСКА) ---
     processed_db_entries_count = 0
-
-    for entry in history_from_db: # entry - это словарь из get_chat_history
+    for entry in history_to_process: # <<< ИЗМЕНЕНИЕ: Используем history_to_process
         role = entry.get("role")
-        # parts теперь уже список словарей Python (результат _deserialize_parts внутри get_chat_history)
+        # parts теперь уже список словарей Python
         parts_list_of_dicts = entry.get("parts")
         db_user_id = entry.get("user_id")
 
@@ -237,33 +276,34 @@ async def prepare_history(
             prepared_history_objects.append(reconstructed_content)
             processed_db_entries_count += 1
 
-    logger.debug(f"History Prep: Finished processing {processed_db_entries_count} entries from DB history.")
+    logger.debug(f"History Prep: Finished processing {processed_db_entries_count} entries from filtered DB history.")
 
+    # --- Очищаем FunctionCall/FunctionResponse ИЗ ПОДГОТОВЛЕННОЙ ИСТОРИИ для API ---
     final_history_for_api: List[Content] = []
     for entry in prepared_history_objects:
         if entry.role == 'model' and entry.parts:
             cleaned_parts = [
                 part for part in entry.parts
                 if not (hasattr(part, 'function_call') and part.function_call is not None)
+                and not (hasattr(part, 'function_response') and part.function_response is not None) # <<< ДОБАВЛЕНО: Удаление FR >>>
             ]
-            # Добавляем сообщение модели только если оно не стало пустым после очистки FC
+            # Добавляем сообщение модели только если оно не стало пустым после очистки FC/FR
             if cleaned_parts:
                 try:
                     cleaned_entry = Content(role='model', parts=cleaned_parts)
                     final_history_for_api.append(cleaned_entry)
-                    logger.debug(f"History Prep API: Kept model entry (FC cleaned).")
+                    logger.debug(f"History Prep API: Kept model entry (FC/FR cleaned).")
                 except Exception as clean_err:
                     logger.error(f"History Prep API: Error creating cleaned model entry: {clean_err}. Skipping.")
             else:
-                logger.debug(f"History Prep API: Skipping model entry that only contained FC.")
+                logger.debug(f"History Prep API: Skipping model entry that only contained FC/FR.")
         else:
             # Добавляем все остальные сообщения (user, system, пустые model) как есть
             final_history_for_api.append(entry)
 
-    # Логируем финальную длину истории для API
     logger.debug(f"Final history length prepared for API call: {len(final_history_for_api)}")
     # Возвращаем подготовленную историю и исходную длину из БД
-    return prepared_history_objects, original_db_len
+    return final_history_for_api, original_db_len
 
 # --- Функция сохранения истории ---
 async def save_history(
@@ -276,7 +316,7 @@ async def save_history(
     """
     Сохраняет НОВЫЕ сообщения из final_history в БД chat_history.
     НЕ сохраняет 'user' и 'function' сообщения.
-    УДАЛЯЕТ 'FunctionCall' части из 'model' сообщений перед сохранением.
+    НЕ удаляет 'FunctionCall' или 'FunctionResponse' части из 'model' сообщений перед сохранением.
     Использует original_db_history_len для определения новых сообщений.
 
     Args:
@@ -293,6 +333,7 @@ async def save_history(
         logger.warning(f"Save History: Received empty or None final_history_obj_list for chat {chat_id}. Nothing to save.")
         return
 
+    # Рассчитываем количество новых элементов, как и раньше
     num_new_items = len(final_history_obj_list) - original_db_history_len
 
     if num_new_items <= 0:
@@ -330,35 +371,32 @@ async def save_history(
                     if part_dict:
                         parts_list_of_dicts.append(part_dict)
                     else:
-                         # _convert_part_to_dict уже логирует ошибку конвертации или пустую часть
                          logger.warning(f"Save History: Skipping part conversion result (None) for role '{role}'. Part object: {part_obj}")
 
-                # --- УДАЛЕНА ФИЛЬТРАЦИЯ FUNCTION CALL ---
-
-                # Шаг 2: Сериализуем ПОЛНЫЙ список словарей (включая FC) в JSON строку
+                # Шаг 2: Сериализуем ПОЛНЫЙ список словарей (включая FC/FR) в JSON строку
                 parts_json_str = "[]" # Значение по умолчанию
                 if parts_list_of_dicts: # Сериализуем, только если список не пустой
                     try:
-                        # Сериализуем исходный список, включая function_call, если он там был
+                        # Сериализуем исходный список, включая function_call/function_response
                         parts_json_str = json.dumps(parts_list_of_dicts, ensure_ascii=False)
-                        logger.debug(f"Save History (model): Serialized parts (incl. FC) for DB: {parts_json_str[:200]}...")
+                        logger.debug(f"Save History (model): Serialized parts (incl. FC/FR) for DB: {parts_json_str[:200]}...") # Обновлен лог
                     except Exception as serialize_err:
-                        logger.error(f"Save History (model): Failed to serialize parts list (incl. FC) to JSON: {serialize_err}. Saving empty list.", exc_info=True)
+                        logger.error(f"Save History (model): Failed to serialize parts list (incl. FC/FR) to JSON: {serialize_err}. Saving empty list.", exc_info=True) # Обновлен лог
                         parts_json_str = "[]" # Fallback
                 else:
                      logger.debug(f"Save History (model): No valid parts to serialize for chat {chat_id} (original list was empty or conversion failed). Saving empty list JSON '[]'.")
 
-                
                 # Шаг 3: Сохраняем в БД
                 try:
                     await database.add_message_to_history(
                         chat_id=chat_id,
                         user_id=current_user_id, # Используем ID пользователя текущего цикла
                         role=role,
-                        parts=parts_json_str # Передаем (потенциально содержащую FC) СТРОКУ JSON
+                        parts=parts_json_str # Передаем (потенциально содержащую FC/FR) СТРОКУ JSON
                     )
-                    logger.info(f"Save History: Successfully saved 'model' entry (incl. FC) to chat_history for chat {chat_id}.") # <-- Обновлен лог
+                    logger.info(f"Save History: Successfully saved 'model' entry (incl. FC/FR) to chat_history for chat {chat_id}.") # <-- Обновлен лог
                     save_count += 1
+                # ... (обработка ошибок DB остается такой же) ...
                 except TypeError as te:
                      logger.critical(f"Save History: TYPE ERROR calling add_message_to_history for 'model' entry (chat {chat_id}): {te}. Check arguments! Passed parts type: {type(parts_json_str)}, value: {parts_json_str[:100]}...", exc_info=True)
                 except AttributeError as ae:
@@ -370,7 +408,6 @@ async def save_history(
                 logger.error(f"Save History: Error processing parts for role '{role}': {e}. Skipping entry.", exc_info=True)
                 continue
         else:
-            # Эта ветка не должна достигаться, т.к. user/function пропускаются выше
             logger.warning(f"Save History: Encountered unexpected role '{role}' during save loop. Skipping.")
 
     logger.info(f"Save History: Finished saving new entries for chat {chat_id}. Saved {save_count} new messages.")

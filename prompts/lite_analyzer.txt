@@ -25,7 +25,7 @@
     ```json
     "arguments": {
         "user_id": <число - user_id из входа>,
-        "info_category": "<строка - извлеченная категория факта>",
+        "category": "<строка - извлеченная категория факта>",
         "info_value": "<строка - извлеченное значение факта>"
     }
     ```
@@ -58,7 +58,7 @@
       "function_name": "remember_user_info",
       "arguments": {
         "user_id": 101,
-        "info_category": "hobby",
+        "category": "hobby",
         "info_value": "фотография"
       }
     }
