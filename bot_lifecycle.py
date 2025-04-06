@@ -10,6 +10,8 @@ from pathlib import Path  # <<< Добавили импорт Path
 from aiogram import Dispatcher  # <<< Добавили импорт Dispatcher
 import google.generativeai as genai
 
+logger = logging.getLogger(__name__)
+
 # --- Основные зависимости ---
 # Импортируем Bot и Dispatcher из загрузчика
 try:
