@@ -131,7 +131,7 @@ async def _execute_pro_model_logic(
                       final_history_obj_list=final_history_obj_list,
                       original_db_history_len=original_db_len,
                       current_user_id=user_id,
-                      last_sent_message_text=last_sent_text # Передаем текст от send_telegram_message
+                      last_sent_message_text=last_sent_text # <<< ДОБАВЛЕНО ОБРАТНО
                 )
             else:
                  logger_ap.error(f"Cannot save Pro history for chat {chat_id}: save_history function is not available.")

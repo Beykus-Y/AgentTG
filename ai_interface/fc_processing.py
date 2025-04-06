@@ -355,6 +355,7 @@ async def process_gemini_fc_cycle(
                 log_stdout = result.get('stdout')
                 log_stderr = result.get('stderr')
                 log_return_code = result.get('returncode')
+                response_content = result
 
                 # Определяем статус
                 if 'status' in result and result['status'] in {'success', 'error', 'not_found', 'warning', 'timeout'}:
@@ -399,6 +400,13 @@ async def process_gemini_fc_cycle(
 
             # Вызываем логирование, если database импортирован успешно
             if database:
+                full_result_json_str = None
+                try:
+                    # Пытаемся сериализовать весь result (может быть dict или другое)
+                    full_result_json_str = json.dumps(result, ensure_ascii=False, default=str)
+                except Exception as json_full_err:
+                    logger.error(f"Failed to serialize full_result for tool log '{fc_name}': {json_full_err}. Storing error message.", exc_info=True)
+                    full_result_json_str = json.dumps({"error": f"Full result serialization failed: {json_full_err}"})
                 try:
                     await database.add_tool_execution_log(
                         chat_id=original_chat_id,
@@ -410,6 +418,7 @@ async def process_gemini_fc_cycle(
                         result_message=log_result_message,
                         stdout=log_stdout,
                         stderr=log_stderr,
+                        full_result=full_result_json_str,
                         trigger_message_id=None # log_trigger_message_id
                     )
                 except Exception as log_err:
@@ -417,29 +426,30 @@ async def process_gemini_fc_cycle(
             # --- /Логирование выполнения инструмента --- <<<
 
             # Добавляем FunctionResponse в список для отправки Gemini
-            response_payload_for_gemini: Any = None # Переменная для данных, которые пойдут в response
+            # ИСПРАВЛЕННЫЙ БЛОК
+            response_payload_for_gemini: Dict[str, Any] # Переменная для словаря, который пойдет в response
 
-            # Пытаемся сериализовать результат инструмента в JSON СТРОКУ
             try:
-                # response_content - это словарь, возвращенный вашим инструментом
-                response_payload_for_gemini = json.dumps(response_content, ensure_ascii=False)
-                logger.debug(f"Serialized FunctionResponse payload to JSON string for '{fc_name}': '{response_payload_for_gemini[:200]}...'")
-            except (TypeError, ValueError) as json_err:
-                # Если сериализация не удалась (маловероятно для словаря от reading_user_info)
-                logger.error(f"Failed to serialize tool result for FunctionResponse: {json_err}. Tool: {fc_name}. Result: {response_content}", exc_info=True)
-                # Формируем JSON строку с ошибкой как fallback
-                error_payload = {"error": f"Failed to serialize tool result: {json_err}"}
-                response_payload_for_gemini = json.dumps(error_payload)
-                logger.debug(f"Using error payload JSON string for '{fc_name}': {response_payload_for_gemini}")
+                # Убедимся, что результат инструмента (response_content) в принципе
+                # может быть сериализован в JSON, но НЕ ПРЕОБРАЗУЕМ его в строку здесь.
+                # Если эта проверка падает, значит сам инструмент вернул несериализуемый объект.
+                _ = json.dumps(response_content) # Просто тест на сериализуемость
+                response_payload_for_gemini = response_content # Используем оригинальный словарь/объект
+                logger.debug(f"Using direct dictionary/object payload for '{fc_name}'. Preview: {str(response_payload_for_gemini)[:200]}...")
+
+            except (TypeError, ValueError) as serialization_test_err:
+                # Если результат инструмента несериализуем
+                logger.error(f"Tool result for '{fc_name}' is not JSON serializable: {serialization_test_err}. Result: {response_content}", exc_info=True)
+                # Формируем словарь с ошибкой, который ТОЧНО сериализуем
+                response_payload_for_gemini = {"error": f"Tool result could not be serialized: {serialization_test_err}"}
+                logger.debug(f"Using error dictionary payload for '{fc_name}'.")
 
             # Добавляем FunctionResponse в список для отправки Gemini
-            # ВАЖНО: поле 'response' объекта FunctionResponse ожидает словарь (Struct).
-            # Мы НЕ можем передать туда просто строку.
-            # Оборачиваем нашу JSON-строку в словарь с ключом, например, 'result_json'.
-            logger.debug(f"Preparing FunctionResponse Part for '{fc_name}' with serialized payload.")
+            # Передаем СЛОВАРЬ напрямую в поле 'response'
+            logger.debug(f"Preparing FunctionResponse Part for '{fc_name}' with direct dictionary payload.")
             response_part_for_gemini = Part(function_response=FunctionResponse(
                 name=fc_name,
-                response={"result_json": response_payload_for_gemini} # <--- Отправляем JSON-строку внутри словаря
+                response=response_payload_for_gemini # <--- Передаем сам словарь напрямую
             ))
             response_parts_for_gemini.append(response_part_for_gemini)
         # --- /Цикл по результатам ---

@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     pro_gemini_model_name: str = "gemini-2.0-flash"
     #pro_gemini_model_name: str = "gemini-1.5-flash-latest"
     #pro_gemini_model_name: str = "gemini-2.0-pro-exp"
+    
     # Пути к файлам промптов
     lite_prompt_file: Path = prompts_dir / "lite_analyzer.txt" # Промпт для Lite-анализатора
     pro_prompt_file: Path = prompts_dir / "pro_assistant.txt"   # Основной промпт для Pro-модели

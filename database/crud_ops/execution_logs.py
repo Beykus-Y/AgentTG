@@ -39,6 +39,7 @@ async def add_tool_execution_log(
     result_message: Optional[str] = None,
     stdout: Optional[str] = None,
     stderr: Optional[str] = None,
+    full_result: Optional[Dict] = None,
     trigger_message_id: Optional[int] = None
 ) -> Optional[int]:
     """
@@ -70,6 +71,15 @@ async def add_tool_execution_log(
         truncated_stdout = (stdout[:MAX_LOG_LEN] + '...[truncated]') if stdout and len(stdout) > MAX_LOG_LEN else stdout
         truncated_stderr = (stderr[:MAX_LOG_LEN] + '...[truncated]') if stderr and len(stderr) > MAX_LOG_LEN else stderr
 
+        # <<< НОВОЕ: Сериализация полного результата >>>
+        full_result_json_str = None
+        if full_result is not None:
+            try:
+                full_result_json_str = json.dumps(full_result, ensure_ascii=False, default=str) # Добавим default=str на всякий случай
+            except Exception as json_err:
+                logger.error(f"Failed to serialize full_result for tool log '{tool_name}': {json_err}. Storing error message.", exc_info=True)
+                full_result_json_str = json.dumps({"error": f"Serialization failed: {json_err}"})
+
         # Добавляем проверку статуса на допустимые значения
         valid_statuses = {'success', 'error', 'not_found', 'warning', 'timeout'}
         if status not in valid_statuses:
@@ -82,12 +92,15 @@ async def add_tool_execution_log(
             """
             INSERT INTO tool_executions (
                 chat_id, user_id, tool_name, tool_args_json, status,
-                return_code, result_message, stdout, stderr, trigger_message_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                return_code, result_message, stdout, stderr, full_result_json,
+                trigger_message_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 chat_id, user_id, tool_name, tool_args_json, status,
-                return_code, result_message, truncated_stdout, truncated_stderr, trigger_message_id
+                return_code, result_message, truncated_stdout, truncated_stderr,
+                full_result_json_str, # <-- Теперь это значение соответствует 10-му полю
+                trigger_message_id  # <-- Теперь это значение соответствует 11-му полю
             )
         )
         inserted_id = cursor.lastrowid # Получаем ID СРАЗУ после execute
@@ -138,7 +151,8 @@ async def get_recent_tool_executions(chat_id: int, limit: int = 3) -> List[Dict[
             await cursor.execute(
                 '''
                 SELECT execution_id, chat_id, user_id, timestamp, tool_name, tool_args_json,
-                       status, return_code, result_message, stdout, stderr, trigger_message_id
+                       status, return_code, result_message, stdout, stderr, full_result_json,
+                       trigger_message_id
                 FROM tool_executions
                 WHERE chat_id = ?
                 ORDER BY timestamp DESC

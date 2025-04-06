@@ -98,6 +98,28 @@
     }
   },
   {
+    "name": "Developer_Feedback",
+    "description": "[META] Use this function ONLY to report operational issues, suspected bugs, limitations, or suggestions directly to the bot developer/administrator. Specify the importance, a brief reason/category, and a detailed description. DO NOT use this for regular user interaction or responding to user queries.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "Degree_of_importance": {
+          "type": "STRING",
+          "description": "Severity or type of the feedback. Recommended values: 'critical', 'high', 'medium', 'low', 'suggestion'."
+        },
+        "Reason": {
+          "type": "STRING",
+          "description": "A brief category or reason for the feedback (e.g., 'Tool Error', 'Unexpected Behavior', 'API Limit Reached', 'Prompt Suggestion', 'Feature Request')."
+        },
+        "Problem": {
+          "type": "STRING",
+          "description": "A detailed description of the issue, observation, or suggestion."
+        }
+      },
+      "required": ["Degree_of_importance", "Reason", "Problem"]
+    }
+  },
+  {
       "name": "execute_terminal_command_in_env",
       "description": "[POWERFUL ENV TOOL] Executes a raw shell command within the user's chat environment's terminal (working directory). Use cautiously for essential file system operations like listing files (`ls -la`), checking the current directory (`pwd`), reading small files (`cat filename.txt`), creating directories (`mkdir dirname`), checking disk usage (`df -h`), etc. Avoid potentially harmful or long-running commands (e.g., `rm -rf`, network scans, complex scripts) unless absolutely necessary and confirmed. Admins might have elevated permissions to operate in other chat directories. The command runs directly as provided.",
       "parameters": {

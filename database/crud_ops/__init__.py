@@ -14,6 +14,11 @@ from .profiles import (
     update_avatar_description,
     find_user_id_by_profile
 )
+
+from .feedback import ( # <<< Добавляем
+    add_developer_feedback
+)
+
 from .notes import (
     upsert_user_note,
     get_user_notes,
@@ -72,5 +77,6 @@ __all__ = [
     "increment_message_count", "get_chat_stats_top_users", "get_user_warn_count", "add_user_warning",
     "remove_user_warning", "get_chat_warnings", "reset_user_warnings",
     # execution_logs
-    "add_tool_execution_log", "get_recent_tool_executions"
+    "add_tool_execution_log", "get_recent_tool_executions", "add_developer_feedback"
+
 ]

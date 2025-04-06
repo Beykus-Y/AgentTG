@@ -242,6 +242,7 @@ async def init_db():
                 result_message TEXT, -- Сообщение из словаря результата
                 stdout TEXT, -- Стандартный вывод (ограничить длину при записи!)
                 stderr TEXT, -- Стандартный вывод ошибок (ограничить длину при записи!)
+                full_result_json TEXT, 
                 trigger_message_id INTEGER -- Опционально: ID сообщения пользователя
             );
         ''')
@@ -254,6 +255,29 @@ async def init_db():
         logger.debug("Committing schema changes...") # Лог перед коммитом
         await conn.commit()
         logger.info("Database schema initialization complete.")
+
+
+
+        # 10. Таблица обратной связи от разработчика/модели
+        logger.debug("Executing CREATE TABLE developer_feedback...")
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS developer_feedback (
+                feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                chat_id INTEGER,      -- ID чата, откуда пришел запрос (если применимо)
+                user_id INTEGER,      -- ID пользователя, инициировавшего запрос (если применимо)
+                model_name TEXT,      -- Модель, сгенерировавшая фидбек (опционально)
+                degree_of_importance TEXT NOT NULL CHECK(degree_of_importance IN ('high', 'medium', 'low', 'critical', 'suggestion')), -- Важность
+                reason TEXT NOT NULL, -- Краткая причина/категория
+                problem_description TEXT NOT NULL, -- Детальное описание
+                status TEXT DEFAULT 'new' CHECK(status IN ('new', 'acknowledged', 'in_progress', 'resolved', 'wont_fix')) -- Статус обработки (опционально)
+            );
+        ''')
+        logger.debug("Executing CREATE INDEX idx_dev_feedback_ts...")
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_dev_feedback_ts ON developer_feedback (timestamp DESC);')
+        logger.debug("Executing CREATE INDEX idx_dev_feedback_status...")
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_dev_feedback_status ON developer_feedback (status);')
+        logger.debug("Checked/Created table and indexes: developer_feedback")
 
     except aiosqlite.Error as e:
         logger.error(f"Error during database initialization: {e}", exc_info=True)

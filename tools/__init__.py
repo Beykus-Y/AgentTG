@@ -15,7 +15,8 @@ tool_module_paths = [
     ".communication_tools",
     ".user_data_tools",
     ".environment_tools",
-    ".deep_search_tool"
+    ".deep_search_tool",
+    ".meta_tools"
     # Добавляйте сюда другие модули с инструментами, если они появятся
 ]
 
