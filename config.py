@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Set, Optional, Union
 
 # Импортируем нужные декораторы и типы из Pydantic
-from pydantic import field_validator, ValidationError
+from pydantic import field_validator, ValidationError, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
@@ -15,6 +15,7 @@ load_dotenv()
 
 # Определяем базовую директорию проекта (предполагаем, что config.py находится в ./Agent/)
 BASE_DIR = Path(__file__).parent.resolve()
+logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     """
@@ -29,11 +30,36 @@ class Settings(BaseSettings):
 
     # --- Основные ключи и ID ---
     bot_token: str
-    google_api_key: str
+    google_api_keys: List[str] = Field(default_factory=list)
     # Оставляем тип Set[int] для конечного результата
     admin_ids: Set[int] = set()
 
     # --- Добавляем Валидатор ---
+    @field_validator('google_api_keys', mode='before')
+    @classmethod
+    def parse_google_api_keys(cls, value: Any) -> List[str]:
+        """
+        Парсит google_api_keys из строки (через запятую) или списка.
+        Фильтрует пустые ключи.
+        """
+        if isinstance(value, list):
+            # Фильтруем пустые строки из списка
+            keys = [key.strip() for key in value if isinstance(key, str) and key.strip()]
+            if not keys:
+                 raise ValueError("GOOGLE_API_KEYS list is empty or contains only invalid entries.")
+            return keys
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("GOOGLE_API_KEYS string is empty.")
+            # Разделяем по запятой и фильтруем пустые
+            keys = [key.strip() for key in value.split(',') if key.strip()]
+            if not keys:
+                 raise ValueError("GOOGLE_API_KEYS string contains no valid keys after splitting.")
+            return keys
+
+        raise ValueError(f"Invalid type for GOOGLE_API_KEYS: {type(value)}. Expected str or list.")
+
+
     @field_validator('admin_ids', mode='before')
     @classmethod
     def parse_admin_ids(cls, value: Any) -> Set[int]:
@@ -74,9 +100,10 @@ class Settings(BaseSettings):
 
     # --- Настройки AI моделей ---
     lite_gemini_model_name: str = "gemini-1.5-flash-latest"
-    #ro_gemini_model_name: str = "gemini-2.0-flash"
-    pro_gemini_model_name: str = "gemini-1.5-flash-latest"
-
+    #pro_gemini_model_name: str = "gemini-2.0-flash-thinking-exp-01-21"
+    pro_gemini_model_name: str = "gemini-2.0-flash"
+    #pro_gemini_model_name: str = "gemini-1.5-flash-latest"
+    #pro_gemini_model_name: str = "gemini-2.0-pro-exp"
     # Пути к файлам промптов
     lite_prompt_file: Path = prompts_dir / "lite_analyzer.txt" # Промпт для Lite-анализатора
     pro_prompt_file: Path = prompts_dir / "pro_assistant.txt"   # Основной промпт для Pro-модели
@@ -144,7 +171,14 @@ class Settings(BaseSettings):
 
 
 # Создаем экземпляр настроек
-settings = Settings() # Теперь эта строка должна отработать корректно
+try:
+    settings = Settings()
+except ValidationError as e:
+     # Выводим ошибки валидации (особенно важно для ключей)
+     init_logger = logging.getLogger(__name__)
+     init_logger.critical(f"FATAL: Configuration validation failed!")
+     init_logger.critical(e)
+     exit(1) # Выход, если конфиг некорректен # Теперь эта строка должна отработать корректно
 
 # Настройка логирования
 # Базовый формат, можно усложнить (добавить имя файла, номер строки и т.д.)

@@ -5,7 +5,7 @@
 # Токен вашего Telegram бота (полученный от @BotFather)
 BOT_TOKEN=1234567890:ABCdefGhIJKlmNOpqRsTuVWxyz123456789
 # Ваш API ключ для Google AI (Gemini API). Получите его на https://aistudio.google.com/app/apikey
-GOOGLE_API_KEY=AIzaSyB...YourGoogleApiKeyHere...xyz
+GOOGLE_API_KEYS=["key_1","key_2"...]
 # Список ID администраторов бота через запятую (БЕЗ пробелов вокруг запятых)
 ADMIN_IDS=12345678,987654321
 
