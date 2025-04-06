@@ -44,7 +44,7 @@ except ImportError:
 # Импортируем доступные инструменты
 logger.info("Attempting to import tools...") # Или print(...)
 try:
-    from tools import available_functions
+    from tools import available_functions as all_available_tools
     logger.info("Successfully imported available_functions from tools.") # Или print(...)
     logger.info(f"Number of functions found by tools init: {len(available_functions)}") # Логируем размер словаря
 except ImportError as e:
