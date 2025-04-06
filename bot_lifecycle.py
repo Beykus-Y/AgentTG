@@ -40,11 +40,17 @@ except ImportError:
     raise
 
 # Импортируем доступные инструменты
+logger.info("Attempting to import tools...") # Или print(...)
 try:
-    from tools import available_functions as all_available_tools
-except ImportError:
-    logging.critical("Failed to import available_functions from tools in bot_lifecycle.")
-    all_available_tools = {}
+    from tools import available_functions
+    logger.info("Successfully imported available_functions from tools.") # Или print(...)
+    logger.info(f"Number of functions found by tools init: {len(available_functions)}") # Логируем размер словаря
+except ImportError as e:
+    logger.critical(f"CRITICAL IMPORT ERROR: Failed to import from tools: {e}", exc_info=True) # Или print(...)
+    available_functions = {} # Создаем пустой словарь, чтобы бот не упал дальше
+except Exception as e:
+     logger.critical(f"CRITICAL UNEXPECTED ERROR during tools import: {e}", exc_info=True) # Или print(...)
+     available_functions = {}
 
 # --- Типы Google ---
 try:

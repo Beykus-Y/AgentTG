@@ -1,4 +1,4 @@
-# tools/__init__.py
+print("--- EXECUTING tools/__init__.py ---")
 import logging
 import asyncio
 import importlib
