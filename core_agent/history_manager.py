@@ -263,7 +263,7 @@ async def prepare_history(
     # Логируем финальную длину истории для API
     logger.debug(f"Final history length prepared for API call: {len(final_history_for_api)}")
     # Возвращаем подготовленную историю и исходную длину из БД
-    return final_history_for_api, original_db_len
+    return prepared_history_objects, original_db_len
 
 # --- Функция сохранения истории ---
 async def save_history(
