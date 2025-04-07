@@ -70,7 +70,7 @@ def _deserialize_parts(parts_json: Optional[str]) -> List[Dict[str, Any]]:
              return [] # Возвращаем пустой список, если это не список
     except json.JSONDecodeError as e:
         logger.error(f"Failed to deserialize parts JSON: {e}. JSON: '{parts_json[:100]}...'")
-        return []
+        return [{"error": "deserialization_failed", "original_json": parts_json[:100] + "..."}]
     except Exception as e:
         logger.error(f"Unexpected error during parts deserialization: {e}", exc_info=True)
         return []

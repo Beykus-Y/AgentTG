@@ -1,7 +1,7 @@
 [
   {
     "name": "send_telegram_message",
-    "description": "[CRITICAL] Sends a text message to the user in the current chat. Use this function for ALL textual communication directed at the user. This includes greetings, responses to queries, reporting results (success or failure) of other tool calls, asking clarifying questions, requesting confirmation, providing any information, or indicating errors. Do NOT assume implicit communication; explicitly use this tool to speak.",
+    "description": "[CRITICAL] Sends a text message to the user in the current chat. Use this function for ALL textual communication directed at the user, including greetings, answers, confirmations, results, errors, and asking questions. Use sequential calls if you need to send multiple messages. Set 'requires_user_response' to true ONLY if you need the user to reply before you can proceed.",
     "parameters": {
       "type": "OBJECT",
       "properties": {
@@ -12,6 +12,10 @@
         "delay_seconds": {
           "type": "INTEGER",
           "description": "(Optional) Delay in seconds before sending the message. Useful for creating pauses or simulating thought."
+        },
+        "requires_user_response": {
+          "type": "BOOLEAN",
+          "description": "(Optional) Set to 'true' ONLY if this message is a question or confirmation that requires an immediate user response before executing subsequent actions or function calls. Defaults to 'false' if omitted. For sequences of messages (like multiple questions or steps), set to 'false'."
         }
       },
       "required": ["text"]

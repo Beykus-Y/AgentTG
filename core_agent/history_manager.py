@@ -278,30 +278,12 @@ async def prepare_history(
 
     logger.debug(f"History Prep: Finished processing {processed_db_entries_count} entries from filtered DB history.")
 
-    # --- Очищаем FunctionCall/FunctionResponse ИЗ ПОДГОТОВЛЕННОЙ ИСТОРИИ для API ---
-    final_history_for_api: List[Content] = []
-    for entry in prepared_history_objects:
-        if entry.role == 'model' and entry.parts:
-            cleaned_parts = [
-                part for part in entry.parts
-                if not (hasattr(part, 'function_call') and part.function_call is not None)
-                and not (hasattr(part, 'function_response') and part.function_response is not None) # <<< ДОБАВЛЕНО: Удаление FR >>>
-            ]
-            # Добавляем сообщение модели только если оно не стало пустым после очистки FC/FR
-            if cleaned_parts:
-                try:
-                    cleaned_entry = Content(role='model', parts=cleaned_parts)
-                    final_history_for_api.append(cleaned_entry)
-                    logger.debug(f"History Prep API: Kept model entry (FC/FR cleaned).")
-                except Exception as clean_err:
-                    logger.error(f"History Prep API: Error creating cleaned model entry: {clean_err}. Skipping.")
-            else:
-                logger.debug(f"History Prep API: Skipping model entry that only contained FC/FR.")
-        else:
-            # Добавляем все остальные сообщения (user, system, пустые model) как есть
-            final_history_for_api.append(entry)
+   
+    # --- НЕ ОЧИЩАЕМ FC/FR из ИСТОРИИ для API ---
 
-    logger.debug(f"Final history length prepared for API call: {len(final_history_for_api)}")
+    final_history_for_api = prepared_history_objects
+    # Добавим лог, чтобы видеть, что передается
+    logger.debug(f"Final history prepared for API call (WITHOUT FC/FR filtering). Length: {len(final_history_for_api)}")
     # Возвращаем подготовленную историю и исходную длину из БД
     return final_history_for_api, original_db_len
 
@@ -364,35 +346,53 @@ async def save_history(
         # Обрабатываем только 'model' роль для сохранения
         if role == 'model':
             parts_list_of_dicts: List[Dict[str, Any]] = []
+            has_function_call = False
             try:
                 # Шаг 1: Конвертируем объекты Part в словари Python
                 for part_obj in parts_obj_list:
                     part_dict = _convert_part_to_dict(part_obj)
                     if part_dict:
                         parts_list_of_dicts.append(part_dict)
+                        if 'function_call' in part_dict: # <<-- Проверяем здесь
+                            has_function_call = True
                     else:
                          logger.warning(f"Save History: Skipping part conversion result (None) for role '{role}'. Part object: {part_obj}")
 
-                # Шаг 2: Сериализуем ПОЛНЫЙ список словарей (включая FC/FR) в JSON строку
+                filtered_parts_for_db: List[Dict[str, Any]] = []
+                if has_function_call:
+                    # Если был FC, оставляем только FC и FR, удаляем text
+                    for p_dict in parts_list_of_dicts:
+                        if 'function_call' in p_dict or 'function_response' in p_dict:
+                            filtered_parts_for_db.append(p_dict)
+                    logger.debug(f"Save History: Filtering out text part(s) for role 'model' (ID: {entry_content._id if hasattr(entry_content, '_id') else 'N/A'}) because FunctionCall exists. Saving only FC/FR parts.")
+                else:
+                    # Если FC не было, сохраняем все части (обычно это только текст)
+                    filtered_parts_for_db = parts_list_of_dicts
+
+
+                # Шаг 2: Сериализуем ИМЕННО отфильтрованный список словарей (включая FC/FR) в JSON строку
                 parts_json_str = "[]" # Значение по умолчанию
-                if parts_list_of_dicts: # Сериализуем, только если список не пустой
+                if filtered_parts_for_db: # Сериализуем, только если список не пустой
                     try:
-                        # Сериализуем исходный список, включая function_call/function_response
-                        parts_json_str = json.dumps(parts_list_of_dicts, ensure_ascii=False)
-                        logger.debug(f"Save History (model): Serialized parts (incl. FC/FR) for DB: {parts_json_str[:200]}...") # Обновлен лог
+                        parts_json_str = json.dumps(filtered_parts_for_db, ensure_ascii=False)
+                        logger.debug(f"Save History (model, filtered): Serialized parts for DB: {parts_json_str[:200]}...") # Обновлен лог
                     except Exception as serialize_err:
-                        logger.error(f"Save History (model): Failed to serialize parts list (incl. FC/FR) to JSON: {serialize_err}. Saving empty list.", exc_info=True) # Обновлен лог
+                        logger.error(f"Save History (model, filtered): Failed to serialize filtered parts list to JSON: {serialize_err}. Saving empty list.", exc_info=True) # Обновлен лог
                         parts_json_str = "[]" # Fallback
                 else:
-                     logger.debug(f"Save History (model): No valid parts to serialize for chat {chat_id} (original list was empty or conversion failed). Saving empty list JSON '[]'.")
+                     logger.debug(f"Save History (model, filtered): No valid parts left after filtering for DB. Saving empty list JSON '[]'.")
 
+                     
+                if parts_json_str == "[]":
+                    logger.warning(f"Save History (model, filtered): Skipping save for chat {chat_id}, role '{role}' because serialized parts resulted in empty JSON '[]'.")
+                    continue
                 # Шаг 3: Сохраняем в БД
                 try:
                     await database.add_message_to_history(
                         chat_id=chat_id,
-                        user_id=current_user_id, # Используем ID пользователя текущего цикла
+                        user_id=current_user_id,
                         role=role,
-                        parts=parts_json_str # Передаем (потенциально содержащую FC/FR) СТРОКУ JSON
+                        parts=parts_json_str # Передаем отфильтрованную СТРОКУ JSON
                     )
                     logger.info(f"Save History: Successfully saved 'model' entry (incl. FC/FR) to chat_history for chat {chat_id}.") # <-- Обновлен лог
                     save_count += 1

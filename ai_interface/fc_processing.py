@@ -10,6 +10,7 @@ try:
     from . import gemini_api
     from utils.helpers import escape_markdown_v2 # Утилита экранирования
     # <<< ДОБАВЛЕНО: Импорт database >>>
+    from utils.converters import _convert_value_for_json
     import database
 except ImportError:
      logging.critical("CRITICAL: Failed to import dependencies (gemini_api, utils.helpers, database) in fc_processing.", exc_info=True)
@@ -263,242 +264,199 @@ async def process_gemini_fc_cycle(
         # Готовим и запускаем задачи выполнения хендлеров
         response_parts_for_gemini: List[Part] = [] # Список ответов для Gemini
         # <<< ИЗМЕНЕНО: Храним (task, original_args) >>>
-        fc_exec_tasks: List[Tuple[asyncio.Task, Optional[Dict]]] = [] # Задачи и их аргументы для asyncio.gather и логирования
-        fc_names_in_batch = [] # Имена функций в текущем батче для сопоставления с результатами
+        interrupt_fc_cycle = False
 
-        for fc in function_calls_to_process:
+        for fc_index, fc in enumerate(function_calls_to_process):
             function_name = fc.name
-            fc_names_in_batch.append(function_name) # Сохраняем имя
+            original_args_for_log: Optional[Dict] = None
             args: Dict[str, Any] = {}
-            original_args_for_log: Optional[Dict] = None # Аргументы для лога
+            handler_result: Any = None
+            execution_error: Optional[Exception] = None
+            log_status = 'error' # Статус по умолчанию для логирования
 
+            # 1. Парсинг аргументов (как и раньше)
             if hasattr(fc, 'args') and fc.args is not None:
                 try:
-                     # Используем _convert_value_for_json для правильной конвертации MapComposite
-                     from utils.converters import _convert_value_for_json
-                     args = _convert_value_for_json(fc.args)
-                     if not isinstance(args, dict):
-                         raise TypeError(f"Converted args is not a dict: {type(args)}")
-                     original_args_for_log = args # Сохраняем успешно распарсенные аргументы
+                    args = _convert_value_for_json(fc.args) # Используем импортированную функцию
+                    if not isinstance(args, dict): raise TypeError("Args not dict")
+                    original_args_for_log = args
                 except (TypeError, ValueError) as e:
-                    logger.error(f"Cannot convert/parse args to dict for FC '{function_name}': {e}. Raw Args: {getattr(fc, 'args', 'MISSING')}")
-                    error_response = Part(function_response=FunctionResponse(name=function_name, response={"error": f"Failed to parse arguments: {e}"}))
-                    response_parts_for_gemini.append(error_response)
-                    # <<< ИЗМЕНЕНО: Добавляем "пустую" задачу и информацию об ошибке парсинга аргументов >>>
-                    error_task = asyncio.create_task(asyncio.sleep(0, result={"error": "Argument parsing failed"}))
-                    error_args_log = {"raw_args": str(getattr(fc, 'args', 'MISSING')), "parsing_error": str(e)}
-                    fc_exec_tasks.append((error_task, error_args_log)) # Добавляем ошибку
-                    continue # Переходим к следующему FC
+                    logger.error(f"Cannot convert/parse args for FC '{function_name}': {e}")
+                    # Формируем ответ об ошибке для Gemini
+                    response_payload = {"error": f"Failed to parse arguments: {e}"}
+                    response_part = Part(function_response=FunctionResponse(name=function_name, response=response_payload))
+                    response_parts_for_gemini.append(response_part)
+                    # Логируем ошибку в БД
+                    if database:
+                         try:
+                              error_args_log = {"raw_args": str(getattr(fc, 'args', 'MISSING')), "parsing_error": str(e)}
+                              asyncio.create_task(database.add_tool_execution_log(
+                                   chat_id=original_chat_id, user_id=original_user_id, tool_name=function_name,
+                                   tool_args=error_args_log, status='error', result_message=f"Argument parsing failed: {e}"
+                              )) # Логируем асинхронно
+                         except Exception as log_err: logger.error(f"DB log error (arg parse fail): {log_err}")
+                    continue # Переходим к следующему FC в пачке
             else:
-                # Если аргументов нет, логируем пустой словарь
                 original_args_for_log = {}
 
-            logger.info(f"Preparing FC execution: {function_name}({args}) for chat {original_chat_id}")
+            logger.info(f"Executing FC {fc_index + 1}/{len(function_calls_to_process)} sequentially: {function_name}({args}) for chat {original_chat_id}")
 
-            # Ищем хендлер
+            # 2. Поиск и выполнение хендлера
             if function_name in available_functions_map:
                 handler = available_functions_map[function_name]
-                # Создаем задачу выполнения хендлера
-                # <<< ИЗМЕНЕНО: Создаем Task явно и сохраняем его вместе с аргументами >>>
-                exec_task = asyncio.create_task(
-                    execute_function_call(
+                try:
+                    handler_result = await execute_function_call(
                         handler_func=handler,
                         args=args,
                         chat_id_for_handlers=original_chat_id,
                         user_id_for_handlers=original_user_id
-                    ),
-                    name=f"FC_{function_name}_{original_chat_id}"
-                )
-                fc_exec_tasks.append((exec_task, original_args_for_log))
+                    )
+                except Exception as exec_err:
+                     execution_error = exec_err # Сохраняем ошибку выполнения
+                     # handler_result остается None
             else:
-                # Если хендлер не найден
-                logger.error(f"Function handler '{function_name}' not found in available_functions_map.")
-                error_response = Part(function_response=FunctionResponse(name=function_name, response={"error": f"Function '{function_name}' is not implemented or available."}))
-                response_parts_for_gemini.append(error_response)
-                # <<< ИЗМЕНЕНО: Добавляем "пустую" задачу и None для аргументов >>>
-                error_task = asyncio.create_task(asyncio.sleep(0, result={"error": "Function not found"}), name=f"FC_NotFound_{function_name}")
-                fc_exec_tasks.append((error_task, original_args_for_log or {}))
+                logger.error(f"Function handler '{function_name}' not found.")
+                handler_result = {"status": "error", "message": f"Function '{function_name}' is not implemented or available."}
+                log_status = 'not_found' # Уточняем статус для лога
 
-        # Если нет задач для выполнения (например, все были с ошибками парсинга/поиска)
-        if not fc_exec_tasks:
-            logger.warning("No valid FC tasks generated in this step. Ending FC cycle prematurely.")
-            break # Прерываем цикл, если нет задач для gather
-
-        # Выполняем все подготовленные задачи параллельно
-        logger.info(f"Executing {len(fc_exec_tasks)} function call handlers concurrently for chat {original_chat_id}...")
-        # <<< ИЗМЕНЕНО: Распаковываем только задачи для gather >>>
-        results = await asyncio.gather(*[task for task, _ in fc_exec_tasks], return_exceptions=True)
-        logger.info(f"Function call handlers finished for chat {original_chat_id}. Got {len(results)} results.")
-
-        # Обрабатываем результаты и готовим ответ для Gemini
-        # <<< ИЗМЕНЕНО: Цикл по результатам для логирования и создания ответа >>>
-        for i, result in enumerate(results):
-            fc_name = fc_names_in_batch[i]
-            original_args = fc_exec_tasks[i][1] # Получаем сохраненные аргументы
-            response_content = None
-
-            # --- Логирование выполнения инструмента --- >>>
-            log_status = 'error'
+            # 3. Обработка результата и логирование
             log_return_code = None
             log_result_message = None
             log_stdout = None
             log_stderr = None
-            log_trigger_message_id = None # Пока не передается
+            response_content_for_fr = None
+            full_result_json_str = None
 
-            if isinstance(result, Exception):
-                # Ошибка возникла при выполнении execute_function_call или asyncio.gather
-                log_result_message = f"Execution failed: {result}"
-                logger.error(f"Error during execution of {fc_name}: {result}", exc_info=result)
-                response_content = {"error": log_result_message} # Ответ для Gemini
-            elif isinstance(result, dict):
-                # Ожидаемый результат - словарь
-                log_stdout = result.get('stdout')
-                log_stderr = result.get('stderr')
-                log_return_code = result.get('returncode')
-                response_content = result
+            if execution_error:
+                 log_status = 'error'
+                 log_result_message = f"Execution failed: {execution_error}"
+                 response_content_for_fr = {"error": log_result_message}
+            elif isinstance(handler_result, dict):
+                 log_stdout = handler_result.get('stdout')
+                 log_stderr = handler_result.get('stderr')
+                 log_return_code = handler_result.get('returncode')
+                 if 'status' in handler_result and handler_result['status'] in {'success', 'error', 'not_found', 'warning', 'timeout'}:
+                     log_status = handler_result['status']
+                     log_result_message = handler_result.get('message', handler_result.get('error')) if log_status == 'error' else handler_result.get('message')
+                 elif 'error' in handler_result:
+                     log_status = 'error'; log_result_message = handler_result['error']
+                 else:
+                     log_status = 'success'; log_result_message = handler_result.get('message')
 
-                # Определяем статус
-                if 'status' in result and result['status'] in {'success', 'error', 'not_found', 'warning', 'timeout'}:
-                    log_status = result['status']
-                    # Если статус 'error', ищем сообщение в 'message' или 'error'
-                    if log_status == 'error':
-                         log_result_message = result.get('message', result.get('error', 'Unknown error'))
-                    else:
-                         log_result_message = result.get('message') # Для success, warning и т.д.
-                elif 'error' in result:
-                    log_status = 'error'
-                    log_result_message = result['error']
-                else:
-                    log_status = 'success' # По умолчанию успех, если нет status или error
-                    log_result_message = result.get('message')
+                 response_content_for_fr = handler_result
 
-                response_content = result # Используем весь словарь как ответ для Gemini
+                 if log_status == 'success':
+                    last_successful_fc_name = function_name
+                    last_successful_fc_result = handler_result
+                    if function_name == 'send_telegram_message':
+                         last_sent_text = original_args_for_log.get('text')
+                         logger.info(f"Recorded sent text via send_telegram_message: '{last_sent_text[:50]}...'")
+                         response_content_for_fr = {"status": "success", "message": "Message queued for sending."} # Упрощаем ответ для Gemini
+            else: # Неожиданный тип результата
+                 log_status = 'success' # Предполагаем успех
+                 log_result_message = f"Handler returned non-dict/non-exception: {type(handler_result)} - {str(handler_result)[:100]}..."
+                 logger.warning(f"Handler '{function_name}' returned unexpected result type: {type(handler_result)}")
+                 response_content_for_fr = {"result_value": str(handler_result)} # Оборачиваем в словарь
 
-                # --- Особая обработка send_telegram_message ---
-                if fc_name == 'send_telegram_message' and log_status == 'success':
-                    last_sent_text = original_args.get('text') # Сохраняем текст отправленного сообщения
-                    logger.info(f"Recorded sent text via send_telegram_message: '{last_sent_text[:50]}...'")
-                    # Не нужно включать результат send_telegram_message в ответ для Gemini, это может запутать модель
-                    response_content = {"status": "success", "message": "Message queued for sending."}
-                # --- /Особая обработка send_telegram_message ---
-
-                # <<< ИЗМЕНЕНО: last_successful_fc_name больше не сохраняем >>>
-                if log_status == 'success':
-                    last_successful_fc_name = fc_name
-                    last_successful_fc_result = result # Сохраняем результат
-
-            else:
-                # Неожиданный тип результата
-                log_status = 'success' # Предполагаем успех, но логируем как warning
-                log_result_message = f"Handler returned non-dict/non-exception result: {type(result)} - {str(result)[:100]}..."
-                logger.warning(f"Handler '{fc_name}' returned unexpected result type: {type(result)}. String repr: {str(result)[:200]}...")
-                # Пытаемся сконвертировать в JSON для Gemini, если не получается - возвращаем как строку
-                try:
-                    response_content = json.loads(json.dumps(result, ensure_ascii=False))
-                except (TypeError, json.JSONDecodeError):
-                     response_content = {"result_string": str(result)}
-
-            # Вызываем логирование, если database импортирован успешно
+            # Логирование в БД (асинхронно)
             if database:
-                full_result_json_str = None
                 try:
-                    # Пытаемся сериализовать весь result (может быть dict или другое)
-                    full_result_json_str = json.dumps(result, ensure_ascii=False, default=str)
+                     full_result_json_str = json.dumps(handler_result, ensure_ascii=False, default=str)
                 except Exception as json_full_err:
-                    logger.error(f"Failed to serialize full_result for tool log '{fc_name}': {json_full_err}. Storing error message.", exc_info=True)
-                    full_result_json_str = json.dumps({"error": f"Full result serialization failed: {json_full_err}"})
-                try:
-                    await database.add_tool_execution_log(
-                        chat_id=original_chat_id,
-                        user_id=original_user_id,
-                        tool_name=fc_name,
-                        tool_args=original_args,
-                        status=log_status,
-                        return_code=log_return_code,
-                        result_message=log_result_message,
-                        stdout=log_stdout,
-                        stderr=log_stderr,
-                        full_result=full_result_json_str,
-                        trigger_message_id=None # log_trigger_message_id
-                    )
-                except Exception as log_err:
-                    logger.error(f"Failed to add tool execution log for '{fc_name}': {log_err}", exc_info=True)
-            # --- /Логирование выполнения инструмента --- <<<
+                     logger.error(f"Failed serialize full_result tool log '{function_name}': {json_full_err}")
+                     full_result_json_str = json.dumps({"error": f"Full result serialization failed: {json_full_err}"})
+                asyncio.create_task(database.add_tool_execution_log(
+                    chat_id=original_chat_id, user_id=original_user_id, tool_name=function_name, tool_args=original_args_for_log,
+                    status=log_status, return_code=log_return_code, result_message=log_result_message,
+                    stdout=log_stdout, stderr=log_stderr, full_result=full_result_json_str, trigger_message_id=None
+                )) # Логируем асинхронно
 
-            # Добавляем FunctionResponse в список для отправки Gemini
-            # ИСПРАВЛЕННЫЙ БЛОК
-            response_payload_for_gemini: Dict[str, Any] # Переменная для словаря, который пойдет в response
-
+            # 4. Подготовка FunctionResponse для Gemini
+            response_payload_for_gemini = {}
             try:
-                # Убедимся, что результат инструмента (response_content) в принципе
-                # может быть сериализован в JSON, но НЕ ПРЕОБРАЗУЕМ его в строку здесь.
-                # Если эта проверка падает, значит сам инструмент вернул несериализуемый объект.
-                _ = json.dumps(response_content) # Просто тест на сериализуемость
-                response_payload_for_gemini = response_content # Используем оригинальный словарь/объект
-                logger.debug(f"Using direct dictionary/object payload for '{fc_name}'. Preview: {str(response_payload_for_gemini)[:200]}...")
+                response_payload_for_gemini = _convert_value_for_json(response_content_for_fr)
+                if not isinstance(response_payload_for_gemini, dict):
+                    response_payload_for_gemini = {"value": response_payload_for_gemini}
+            except Exception as conversion_err:
+                 logger.error(f"Explicit conversion tool result failed '{function_name}': {conversion_err}")
+                 response_payload_for_gemini = {"error": f"Tool result conversion failed: {conversion_err}"}
 
-            except (TypeError, ValueError) as serialization_test_err:
-                # Если результат инструмента несериализуем
-                logger.error(f"Tool result for '{fc_name}' is not JSON serializable: {serialization_test_err}. Result: {response_content}", exc_info=True)
-                # Формируем словарь с ошибкой, который ТОЧНО сериализуем
-                response_payload_for_gemini = {"error": f"Tool result could not be serialized: {serialization_test_err}"}
-                logger.debug(f"Using error dictionary payload for '{fc_name}'.")
+            # Добавляем результат в список для отправки в API
+            response_part = Part(function_response=FunctionResponse(name=function_name, response=response_payload_for_gemini))
+            response_parts_for_gemini.append(response_part)
 
-            # Добавляем FunctionResponse в список для отправки Gemini
-            # Передаем СЛОВАРЬ напрямую в поле 'response'
-            logger.debug(f"Preparing FunctionResponse Part for '{fc_name}' with direct dictionary payload.")
-            response_part_for_gemini = Part(function_response=FunctionResponse(
-                name=fc_name,
-                response=response_payload_for_gemini # <--- Передаем сам словарь напрямую
-            ))
-            response_parts_for_gemini.append(response_part_for_gemini)
-        # --- /Цикл по результатам ---
+            # 5. Проверка на блокирующий вызов
+            is_blocking = False
+            # Пример: считаем блокирующим вызов send_telegram_message, если текст заканчивается на "?"
+            if function_name == 'send_telegram_message':
+                # Получаем значение аргумента, по умолчанию False
+                requires_response = args.get('requires_user_response', False)
+                # Убедимся, что значение булево (модель может вернуть строку 'true'/'false')
+                if isinstance(requires_response, str):
+                    requires_response = requires_response.lower() == 'true'
 
-        # Если не было частей для ответа (маловероятно, т.к. были FCs)
+                if requires_response is True: # Явная проверка на True
+                    logger.info(f"Blocking FC detected ({function_name} with requires_user_response=True). Interrupting batch after this call.")
+                    is_blocking = True
+
+            # Если вызов блокирующий, прерываем обработку ОСТАЛЬНЫХ FC из этой пачки
+            if is_blocking:
+                 interrupt_fc_cycle = True # Устанавливаем флаг для внешнего цикла
+                 break # Прерываем цикл for fc in function_calls_to_process
+
+        # --- КОНЕЦ внутреннего цикла for fc in function_calls_to_process ---
+
+        # Если цикл был прерван блокирующим вызовом, выходим из основного цикла while
+        if interrupt_fc_cycle:
+             logger.info("Exiting FC cycle early due to blocking call. Sending executed responses back.")
+             # Отправляем те ответы, что успели собрать ДО блокирующего вызова
+             if response_parts_for_gemini:
+                  logger.info(f"Sending {len(response_parts_for_gemini)} function responses (before block) back to Gemini for chat {original_chat_id}.")
+                  try:
+                      content_with_responses = Content(role="function", parts=response_parts_for_gemini)
+                      loop = asyncio.get_running_loop()
+                      # Важно: Этот вызов НЕ обновляет current_response для СЛЕДУЮЩЕЙ итерации,
+                      # так как мы прерываем цикл while. Его результат нам не нужен.
+                      await loop.run_in_executor(
+                           None, gemini_api.send_message_to_gemini,
+                           model_instance, chat_session, content_with_responses
+                      )
+                      final_history = getattr(chat_session, 'history', None) # Сохраняем историю до прерывания
+                  except Exception as api_err:
+                       logger.error(f"Error sending partial function responses to Gemini API before blocking exit: {api_err}", exc_info=True)
+                       # Не прерываем здесь, просто логируем ошибку отправки
+             else:
+                  logger.warning("Blocking call detected, but no responses to send back (e.g., error occurred before block).")
+             break # <-- ВЫХОДИМ ИЗ ОСНОВНОГО ЦИКЛА WHILE
+
+        # Если все FC в пачке обработаны БЕЗ прерывания
+        # Отправляем собранные ответы Gemini и получаем следующий ответ модели
         if not response_parts_for_gemini:
-             logger.warning("No response parts generated for Gemini despite processing FC results. Ending cycle.")
-             break # Выход из цикла while
+             logger.warning("No response parts generated for Gemini in this step, though FCs were present. Ending cycle.")
+             break
 
-        # Отправляем собранные ответы Gemini
         logger.info(f"Sending {len(response_parts_for_gemini)} function responses back to Gemini for chat {original_chat_id}.")
         if gemini_api is None:
-            logger.critical("gemini_api module is not available! Cannot send function responses.")
-            break # Выход из цикла while
+            logger.critical("gemini_api module unavailable.")
+            break
+
         try:
-            # Создаем Content объект с ролью 'function'
             content_with_responses = Content(role="function", parts=response_parts_for_gemini)
-
-            # <<< ИСПРАВЛЕНИЕ TypeError: ВОЗВРАЩАЕМ run_in_executor >>>
             loop = asyncio.get_running_loop()
-            current_response = await loop.run_in_executor(
-                 None, # Используем executor по умолчанию
-                 gemini_api.send_message_to_gemini, # Имя синхронной функции
-                 model_instance, # 1-й аргумент (model)
-                 chat_session,   # 2-й аргумент (chat_session)
-                 content_with_responses # 3-й аргумент (user_message / FR)
+            current_response = await loop.run_in_executor( # Этот вызов важен для следующей итерации
+                 None, gemini_api.send_message_to_gemini,
+                 model_instance, chat_session, content_with_responses
             )
-            # <<< КОНЕЦ ИСПРАВЛЕНИЯ >>>
-
-            logger.debug(f"Received response from Gemini after sending FRs for chat {original_chat_id}")
-            response_parts_for_gemini = [] # Очищаем для след. шага
-            # <<< ОБНОВЛЕНИЕ: Сохраняем историю после успешной отправки FR >>>
-            final_history = getattr(chat_session, 'history', None)
+            logger.debug(f"Received next response from Gemini after sending FRs for chat {original_chat_id}")
+            final_history = getattr(chat_session, 'history', None) # Обновляем историю
+            # response_parts_for_gemini очистится в начале следующей итерации while (перенесли инициализацию)
 
         except Exception as api_err:
              logger.error(f"Error sending function responses to Gemini API: {api_err}", exc_info=True)
-             current_response = None # Прерываем цикл при ошибке API
-             break # <<< ИСПРАВЛЕНИЕ: Выход из цикла при ошибке API >>>
+             current_response = None # Прерываем цикл while при ошибке API
+             break
 
-    # Цикл завершен (по шагам, отсутствию FC или ошибке)
+    # Цикл завершен (по шагам, отсутствию FC, ошибке или прерыванию)
+    # --->>> КОНЕЦ ИЗМЕНЕНИЙ <<<---
     logger.info(f"FC processing cycle finished after {step} step(s) for chat {original_chat_id}.")
-    # <<< ИСПРАВЛЕНИЕ ValueError: Всегда возвращаем 4 значения, используя инициализированные/обновленные переменные >>>
     return final_history, last_successful_fc_name, last_sent_text, last_successful_fc_result
-
-
-# Утилита для извлечения текста (может быть перенесена)
-# async def extract_final_text(history: List[Content]) -> Optional[str]:
-#     ...
-
-# Утилита для сохранения истории (может быть перенесена)
-# async def save_final_history(chat_id: int, history: List[Content]):
-#     ...

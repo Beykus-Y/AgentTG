@@ -43,6 +43,7 @@ async def send_telegram_message(
         chat_id (int): ID чата Telegram.
         text (str): Текст сообщения (будет экранирован).
         delay_seconds (int): Задержка перед отправкой в секундах.
+        requires_user_response (bool): Используется циклом FC для определения необходимости паузы (не используется внутри этой функции).
 
     Returns:
         Dict[str, str]: Словарь со статусом операции ('success' или 'error') и сообщением.

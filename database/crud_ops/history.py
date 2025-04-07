@@ -125,16 +125,30 @@ async def get_chat_history(chat_id: int, limit: int = 50) -> List[Dict[str, Any]
 
         for row in reversed(rows):
             # --- ВЫЗОВ ДЕСЕРИАЛИЗАЦИИ ---
-            parts_list = _deserialize_parts(row['parts_json']) # <<< ДОБАВЛЕН ВЫЗОВ
+            parts_list = _deserialize_parts(row['parts_json']) # <-- Сначала десериализуем
             # ---------------------------
-            if parts_list: # Добавляем только если части успешно десериализовались
-                entry = {"role": row["role"], "parts": parts_list} # <<< Используем parts_list
+
+            # --->>> НАЧАЛО ИСПРАВЛЕННОГО БЛОКА <<<---
+            deserialization_error = False
+            # Проверяем на маркер ошибки ПОСЛЕ десериализации
+            # Убираем лишний отступ у этого if
+            if parts_list and isinstance(parts_list, list) and len(parts_list) > 0 and isinstance(parts_list[0], dict) and parts_list[0].get("error") == "deserialization_failed":
+                # Логгируем ошибку и устанавливаем флаг
+                logger.error(f"History entry skipped due to deserialization error: chat={chat_id}, role={row['role']}, ts={row['timestamp']}")
+                deserialization_error = True
+                # Пропускаем обработку этой записи, так как она повреждена
+                continue # <-- ВАЖНО: переходим к следующей строке истории
+            # --->>> КОНЕЦ ИСПРАВЛЕННОГО БЛОКА <<<---
+
+            # Добавляем запись в историю, только если не было ошибки десериализации
+            # и список частей не пустой (если мы все же решили не сохранять пустые)
+            if not deserialization_error and parts_list:
+                entry = {"role": row["role"], "parts": parts_list}
                 if row["role"] == 'user' and row['user_id'] is not None:
                     entry['user_id'] = row['user_id']
                 history_list.append(entry)
-            else:
-                 # Логируем, если десериализация не удалась или вернула пустой список
-                 logger.warning(f"Failed deserialize parts or got empty list, skipping history entry. chat={chat_id}, role={row['role']}, ts={row['timestamp']}")
+            elif not deserialization_error: # Если список пуст, но ошибки не было
+                 logger.warning(f"Deserialized parts resulted in empty list (and no error marker), skipping history entry. chat={chat_id}, role={row['role']}, ts={row['timestamp']}")
 
         logger.debug(f"Retrieved {len(history_list)} history entries for chat_id={chat_id} (limit={limit})")
         return history_list
@@ -145,8 +159,7 @@ async def get_chat_history(chat_id: int, limit: int = 50) -> List[Dict[str, Any]
     except Exception as e:
         logger.error(f"Unexpected error fetching chat history chat_id={chat_id}: {e}", exc_info=True)
         return []
-
-
+        
 async def clear_chat_history(chat_id: int) -> int:
     """
     Удаляет всю историю сообщений для указанного chat_id.

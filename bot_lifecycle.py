@@ -46,7 +46,7 @@ logger.info("Attempting to import tools...") # Или print(...)
 try:
     from tools import available_functions as all_available_tools
     logger.info("Successfully imported available_functions from tools.") # Или print(...)
-    logger.info(f"Number of functions found by tools init: {len(available_functions)}") # Логируем размер словаря
+    logger.info(f"Number of functions found by tools init: {len(all_available_tools)}") # Логируем размер словаря
 except ImportError as e:
     logger.critical(f"CRITICAL IMPORT ERROR: Failed to import from tools: {e}", exc_info=True) # Или print(...)
     available_functions = {} # Создаем пустой словарь, чтобы бот не упал дальше
