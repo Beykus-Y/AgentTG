@@ -28,7 +28,8 @@ try:
 except ImportError as e:
     logger_types = logging.getLogger(__name__)
     # Логируем критическую ошибку импорта RepeatedComposite
-    logger_types.critical(f"CRITICAL: Failed to import RepeatedComposite from google.protobuf.internal.containers: {e}", exc_info=True)
+    # logger_types.critical(f"CRITICAL: Failed to import RepeatedComposite from google.protobuf.internal.containers: {e}", exc_info=True) # Это слишком критичный лог для ошибки protobuf
+    logger_types.warning(f"WARNING: Failed to import RepeatedComposite from google.protobuf.internal.containers: {e}. History reconstruction might be affected.", exc_info=True) # Меняем на warning
     RepeatedComposite = Any # Определяем как Any, если импорт не удался
 
 
@@ -111,7 +112,7 @@ async def prepare_history(
     """
     Получает историю из БД, заметки/профиль пользователя, недавние логи выполнения,
     форматирует историю для модели (префиксы).
-    *** УДАЛЕНА некорректная логика фильтрации последнего текстового сообщения модели. ***
+    *** ИСПРАВЛЕНО: Теперь корректно обрабатывает данные, полученные из database.get_chat_history. ***
 
     Возвращает:
         - final_history_for_api: Список объектов Content (или их заглушек) для model.start_chat().
@@ -121,8 +122,9 @@ async def prepare_history(
 
     # Проверка доступности БД и необходимых утилит/типов перед началом работы
     # Проверяем database и ключевые функции конвертации
-    if database is None or _deserialize_parts is None or reconstruct_content_object is None or escape_markdown_v2 is None:
-         logger.critical("Database module or essential utility functions/types unavailable. Cannot prepare history.")
+    # УДАЛЕНО: Проверка reconstruct_content_object здесь, т.к. это внутренняя функция
+    if database is None or _deserialize_parts is None or escape_markdown_v2 is None:
+         logger.critical("Database module or essential utility functions unavailable. Cannot prepare history.")
          # Логи из предыдущих запусков показывают, что database и конвертеры могут быть None
          # due to the RepeatedComposite error.
          # Если эта ошибка возникла, возвращаем пустую историю и 0 записей.
@@ -139,6 +141,7 @@ async def prepare_history(
         # Получаем историю в виде словарей (как она хранится в БД)
         # Проверяем наличие функций перед вызовом на всякий случай
         if hasattr(database, 'get_chat_history'):
+             # <<< ИСПРАВЛЕНО: get_chat_history теперь возвращает parts_json как строку >>>
              history_from_db = await database.get_chat_history(chat_id) # Ожидаем List[Dict]
              original_db_len = len(history_from_db) # <<< ЗАПОМИНАЕМ ОРИГИНАЛЬНУЮ ДЛИНУ ЗДЕСЬ
         else: logger.warning("Database.get_chat_history unavailable.")
@@ -329,84 +332,94 @@ async def prepare_history(
     # Проверяем, что reconstruct_content_object и _deserialize_parts доступны
     if reconstruct_content_object and _deserialize_parts and Content is not Any and Part is not Any:
         for entry in history_from_db:
+            # <<< ИСПРАВЛЕНО: Читаем raw JSON строку из 'parts_json' >>>
             role = entry.get("role")
-            parts_json_str = entry.get("parts_json") # Получаем строку JSON
+            parts_json_str = entry.get("parts_json") # Получаем СТРОКУ JSON
             db_user_id = entry.get("user_id") # ID пользователя из БД
+            # timestamp = entry.get("timestamp") # Опционально, если нужен
 
-            if not role or parts_json_str is None or not isinstance(parts_json_str, str):
-                logger.warning(f"History Prep: Skipping DB entry with missing/invalid role or parts_json: {entry}")
-                continue
+            # <<< ИСПРАВЛЕНО: Удален некорректный check >>>
+            # if not role or parts_json_str is None or not isinstance(parts_json_str, str):
+            #     logger.warning(f"History Prep: Skipping DB entry with missing/invalid role or parts_json: {entry}")
+            #     continue
 
-            # НЕ пропускаем 'function' роли здесь. Они нужны модели для FC цикла.
-
-            # Десериализуем JSON строку в список словарей
+            # <<< ИСПРАВЛЕНО: Десериализуем строку JSON здесь >>>
             parts_list_of_dicts = _deserialize_parts(parts_json_str)
+
+            # --->>> НАЧАЛО ИСПРАВЛЕННОГО БЛОКА (Deserialization Error Check) <<<---
+            # Проверяем на маркер ошибки ПОСЛЕ десериализации
+            if parts_list_of_dicts and isinstance(parts_list_of_dicts, list) and len(parts_list_of_dicts) > 0 and isinstance(parts_list_of_dicts[0], dict) and parts_list_of_dicts[0].get("error") == "deserialization_failed":
+                # Логгируем ошибку и пропускаем эту запись
+                logger.error(f"History entry skipped due to deserialization error: chat={chat_id}, role={role}, ts={entry.get('timestamp', 'N/A')}")
+                continue # <-- ВАЖНО: переходим к следующей строке истории
+            # --->>> КОНЕЦ ИСПРАВЛЕННОГО БЛОКА <<<---
+
+
+            # <<< ИСПРАВЛЕНО: Пропускаем записи, если десериализация дала пустой список И это не модель/функция (опционально) >>>
+            # Если десериализованный список частей пустой, и роль - не пользователь/модель/функция (что странно), или если мы не хотим добавлять пустые
+            # Сейчас мы сохраняем пустые для модели (например, если модель ничего не сгенерировала), но не хотим добавлять их в историю для модели, если они пришли из БД как пустые?
+            # Если parts_list_of_dicts пустой, reconstruct_content_object вернет None. Проверим это ниже.
 
             # Пытаемся реконструировать объект Content из словарей
             reconstructed_content = reconstruct_content_object(role, parts_list_of_dicts)
 
-            # Добавляем реконструированный объект
-            # Проверяем, что объект Content успешно создан и имеет правильную роль
-            if reconstructed_content and getattr(reconstructed_content, 'role', None) == role:
-                 # Добавляем префикс пользователя (если нужно)
-                 # Добавляем префикс ТОЛЬКО К СООБЩЕНИЯМ ПОЛЬЗОВАТЕЛЕЙ, если чат не личный
-                 # Проверяем, что escape_markdown_v2 доступен перед использованием
-                 if role == 'user' and db_user_id is not None and chat_type != ChatType.PRIVATE and escape_markdown_v2 is not None:
-                     try:
-                         # Ищем текстовую часть для добавления префикса и модифицируем ее
-                         # Убедимся, что glm и glm.Part доступны, если используем их.
-                         if all([glm, glm.Part]):
-                             new_parts_for_user_entry = []
-                             prefix_added = False
-                             # Итерируемся по частям, чтобы найти текстовую
-                             for original_part in reconstructed_content.parts:
-                                  # Проверяем тип Part и наличие текста
-                                  if isinstance(original_part, glm.Part) and hasattr(original_part, 'text') and isinstance(original_part.text, str):
-                                      # Создаем новую Part с префиксом
-                                      prefixed_text = f"User {db_user_id}: {original_part.text}"
-                                      # Создаем новую Part, так как Part из glm могут быть immutable
-                                      new_parts_for_user_entry.append(glm.Part(text=prefixed_text))
-                                      prefix_added = True
-                                  elif isinstance(original_part, glm.Part):
-                                      # Сохраняем другие типы частей (FC, FR) без изменений
-                                      new_parts_for_user_entry.append(original_part)
-                                  # Игнорируем другие типы в parts (если они там оказались)
+            # <<< ИСПРАВЛЕНО: Добавляем реконструированный объект ТОЛЬКО если он успешно создан >>>
+            if reconstructed_content is None:
+                 logger.warning(f"History Prep: Skipped DB entry for role '{role}' because reconstruction failed or resulted in empty content.")
+                 continue # Skip to the next entry
 
-                             # Если удалось добавить префикс хотя бы к одной текстовой части, заменяем parts у reconstructed_content
-                             if prefix_added:
-                                  # Создаем новый Content объект с модифицированными частями
-                                  reconstructed_content = glm.Content(role='user', parts=new_parts_for_user_entry)
-                                  logger.debug(f"Added user prefix for chat {chat_id}, user {db_user_id}.")
-                             else:
-                                logger.debug(f"History Prep: Could not add user prefix for chat {chat_id}, user {db_user_id}: No text part found in reconstructed Content.")
+            # Добавляем префикс пользователя (если нужно)
+            # Добавляем префикс ТОЛЬКО К СООБЩЕНИЯМ ПОЛЬЗОВАТЕЛЕЙ, если чат не личный
+            # Проверяем, что escape_markdown_v2 доступен перед использованием
+            # ИСПОЛЬЗУЕМ reconstructed_content!
+            if role == 'user' and db_user_id is not None and chat_type != ChatType.PRIVATE and escape_markdown_v2 is not None:
+                try:
+                    # Ищем текстовую часть для добавления префикса и модифицируем ее
+                    # Убедимся, что glm и glm.Part доступны, если используем их.
+                    if all([glm, glm.Part]):
+                        new_parts_for_user_entry = []
+                        prefix_added = False
+                        # Итерируемся по частям, чтобы найти текстовую
+                        for original_part in reconstructed_content.parts:
+                             # Проверяем тип Part и наличие текста
+                             if isinstance(original_part, glm.Part) and hasattr(original_part, 'text') and isinstance(original_part.text, str):
+                                 # Создаем новую Part с префиксом
+                                 prefixed_text = f"User {db_user_id}: {original_part.text}"
+                                 # Создаем новую Part, так как Part из glm могут быть immutable
+                                 new_parts_for_user_entry.append(glm.Part(text=prefixed_text))
+                                 prefix_added = True
+                             elif isinstance(original_part, glm.Part):
+                                 # Сохраняем другие типы частей (FC, FR) без изменений
+                                 new_parts_for_user_entry.append(original_part)
+                             # Игнорируем другие типы в parts (если они там оказались)
 
-                         elif Content and Part: # Fallback с заглушками Part/Content
-                              # Логика с заглушками будет проще, но менее надежной
-                              # Пропустим добавление префикса в этом случае
-                              logger.warning("History Prep: Skipping user prefix due to missing Google types.")
-                         else:
-                             logger.warning("History Prep: Skipping user prefix due to missing Google or fallback types.")
+                        # Если удалось добавить префикс хотя бы к одной текстовой части, заменяем parts у reconstructed_content
+                        if prefix_added:
+                             # Создаем новый Content объект с модифицированными частями
+                             # <<< ИСПРАВЛЕНО: Используем glm.Content >>>
+                             reconstructed_content = glm.Content(role='user', parts=new_parts_for_user_entry)
+                             logger.debug(f"Added user prefix for chat {chat_id}, user {db_user_id}.")
+                        else:
+                           logger.debug(f"History Prep: Could not add user prefix for chat {chat_id}, user {db_user_id}: No text part found in reconstructed Content.")
 
-
-                     except Exception as prefix_err:
-                         logger.error(f"Error adding user prefix to reconstructed content: {prefix_err}", exc_info=True)
-                         # Продолжаем, даже если не удалось добавить префикс
-
-                 # Добавляем обработанный (возможно, с префиксом) Content объект
-                 prepared_history_objects.append(reconstructed_content)
-                 processed_db_entries_count += 1
-
-            else:
-                logger.warning(f"History Prep: Skipped DB entry for role '{role}' because reconstruction failed or returned None/wrong role.")
-                # Можно добавить запись-заглушку об ошибке в историю, чтобы модель видела, что был пропуск
-                # Проверяем, что Content и Part доступны перед созданием заглушки
-                if Content is not Any and Part is not Any:
-                    error_content = Content(role="model", parts=[Part(text=f"Internal Error: Failed to reconstruct history entry for role '{role}'.")])
-                    prepared_history_objects.append(error_content)
-                    logger.warning(f"History Prep: Added error placeholder for role '{role}'.")
+                    elif Content and Part: # Fallback с заглушками Part/Content
+                         # Логика с заглушками будет проще, но менее надежной
+                         # Пропустим добавление префикса в этом случае
+                         logger.warning("History Prep: Skipping user prefix due to missing Google types.")
+                    else:
+                        logger.warning("History Prep: Skipping user prefix due to missing Google or fallback types.")
 
 
-        logger.debug(f"History Prep: Finished processing {processed_db_entries_count} entries from DB history. Prepared {len(prepared_history_objects)} Content objects.")
+                except Exception as prefix_err:
+                    logger.error(f"Error adding user prefix to reconstructed content: {prefix_err}", exc_info=True)
+                    # Продолжаем, даже если не удалось добавить префикс
+
+            # <<< ИСПРАВЛЕНО: Добавляем успешно реконструированный объект >>>
+            prepared_history_objects.append(reconstructed_content)
+            processed_db_entries_count += 1
+
+
+        logger.debug(f"History Prep: Finished processing {len(history_from_db)} entries from DB history. Prepared {len(prepared_history_objects)} Content objects.")
     else:
         logger.critical("History Prep: Skipping DB history processing: _deserialize_parts, reconstruct_content_object, or Google AI types unavailable.")
 
@@ -490,13 +503,14 @@ async def save_history(
         if role == 'function':
             logger.debug(f"Save History: Skipping role 'function' entry, not saving to chat_history.")
             continue
-        if role == 'user':
-            logger.debug(f"Save History: Skipping role 'user' entry, should be saved on send.")
-            continue
+        # <<< ИСПРАВЛЕНО: УДАЛЕНО Пропускание 'user' роли >>>
+        # if role == 'user':
+        #     logger.debug(f"Save History: Skipping role 'user' entry, should be saved on send.")
+        #     continue
 
 
-        # --- Обрабатываем только 'model' роль для сохранения ---
-        if role == 'model':
+        # --- Обрабатываем только 'model' и 'user' роли для сохранения ---
+        if role in {'model', 'user'}: # <<< ИСПРАВЛЕНО: Включаем 'user' роль для сохранения здесь >>>
             parts_list_of_dicts: List[Dict[str, Any]] = []
             # Переменная has_function_call больше не используется для логики фильтрации
 
@@ -530,30 +544,39 @@ async def save_history(
                 # Проверяем, доступен ли _convert_value_for_json перед использованием в default
                 if filtered_parts_for_db:
                     try:
-                        parts_json_str = json.dumps(filtered_parts_for_db, ensure_ascii=False, default=(_convert_value_for_json if _convert_value_for_json else str)) # Используем str как fallback для default
-                        logger.debug(f"Save History (model): Serialized parts for DB (size: {len(parts_json_str)}): {parts_json_str[:200]}...")
+                        # Используем sorted=True для консистентности, чтобы пустые части могли быть исключены
+                        parts_json_str = json.dumps(filtered_parts_for_db, ensure_ascii=False, default=(_convert_value_for_json if _convert_value_for_json else str), sort_keys=True) # <<< ДОБАВЛЕНО sort_keys=True
+                        logger.debug(f"Save History ({role}): Serialized parts for DB (size: {len(parts_json_str)}): {parts_json_str[:200]}...")
                     except Exception as serialize_err:
-                        logger.error(f"Save History (model): Failed to serialize parts list to JSON: {serialize_err}. Saving empty list.", exc_info=True)
+                        logger.error(f"Save History ({role}): Failed to serialize parts list to JSON: {serialize_err}. Saving empty list.", exc_info=True)
                         parts_json_str = "[]" # Fallback
 
                 # Если после сериализации получился пустой список JSON '[]', возможно, сообщение не содержало ничего полезного
                 # Пропускаем сохранение, если JSON пустой, чтобы не засорять историю
-                if parts_json_str == "[]":
-                    logger.debug(f"Save History (model): Skipping save for chat {chat_id}, role '{role}' because serialized parts resulted in empty JSON '[]'.")
-                    continue
+                # <<< ИСПРАВЛЕНО: Не пропускаем пустые части для роли 'model' >>>
+                # Это важно, т.к. Gemini может вернуть модельную часть без текста, но с FC
+                # Если роль 'user', пустые части все равно можно пропустить
+                if parts_json_str == "[]" and role == 'user':
+                     logger.debug(f"Save History ({role}): Skipping save for chat {chat_id}, role '{role}' because serialized parts resulted in empty JSON '[]'.")
+                     continue
+                elif parts_json_str == "[]" and role == 'model':
+                     logger.debug(f"Save History ({role}): Saving empty parts JSON for role '{role}' (expected for FC-only responses).")
+
 
                 # Шаг 3: Сохраняем в БД
                 try:
                     # Вызываем add_message_to_history с уже готовой JSON строкой
                     # Проверяем наличие функции перед вызовом
                     if hasattr(database, 'add_message_to_history'):
+                         # <<< ИСПРАВЛЕНО: Передаем user_id только для роли 'user' >>>
+                         user_id_to_save = current_user_id if role == 'user' else None
                          await database.add_message_to_history(
                              chat_id=chat_id,
-                             user_id=current_user_id, # Сохраняем ID пользователя, который инициировал диалог
+                             user_id=user_id_to_save, # Передаем user_id или None
                              role=role,
                              parts=parts_json_str # Передаем СТРОКУ JSON
                          )
-                         logger.info(f"Save History: Successfully saved 'model' entry (incl. text, FC, FR) to chat_history for chat {chat_id}. JSON size: {len(parts_json_str)}.")
+                         logger.info(f"Save History: Successfully saved '{role}' entry to chat_history for chat {chat_id}. JSON size: {len(parts_json_str)}.")
                          save_count += 1
                     else:
                          logger.critical("Save History: Database.add_message_to_history function unavailable during save loop.")
@@ -561,11 +584,11 @@ async def save_history(
 
                 # Обработка ошибок базы данных (остается прежней)
                 except TypeError as te:
-                     logger.critical(f"Save History: TYPE ERROR calling add_message_to_history for 'model' entry (chat {chat_id}): {te}. Check arguments! Passed parts type: {type(parts_json_str)}, value: {parts_json_str[:100]}...", exc_info=True)
+                     logger.critical(f"Save History: TYPE ERROR calling add_message_to_history for '{role}' entry (chat {chat_id}): {te}. Check arguments! Passed parts type: {type(parts_json_str)}, value: {parts_json_str[:100]}...", exc_info=True)
                 except AttributeError as ae:
-                     logger.critical(f"Save History: ATTRIBUTE ERROR calling DB function for 'model' entry (chat {chat_id}): {ae}. CHECK FUNCTION NAME! Expected 'add_message_to_history'. Parts JSON: {parts_json_str}", exc_info=True)
+                     logger.critical(f"Save History: ATTRIBUTE ERROR calling DB function for '{role}' entry (chat {chat_id}): {ae}. CHECK FUNCTION NAME! Expected 'add_message_to_history'. Parts JSON: {parts_json_str}", exc_info=True)
                 except Exception as db_save_err:
-                    logger.error(f"Save History: DB Error calling add_message_to_history for 'model' entry (chat {chat_id}): {db_save_err}", exc_info=True)
+                    logger.error(f"Save History: DB Error calling add_message_to_history for '{role}' entry (chat {chat_id}): {db_save_err}", exc_info=True)
 
             except Exception as e: # Ловим любые ошибки на этапе конвертации/сериализации для этой записи
                 logger.error(f"Save History: Error processing parts for role '{role}': {e}. Skipping entry.", exc_info=True)
@@ -573,6 +596,7 @@ async def save_history(
         else:
             # Если роль не 'user', 'function' и не 'model' (неожиданно)
             logger.warning(f"Save History: Encountered unexpected role '{role}' during save loop. Skipping.")
+
 
     logger.info(f"Save History: Finished saving new entries for chat {chat_id}. Saved {save_count} new messages.")
 
