@@ -3,37 +3,54 @@
 import logging
 import json
 import re
-from typing import List, Dict, Any, Optional, Tuple, Union
+# <<< ДОБАВЛЕНЫ ИМПОРТЫ ВЕРСИОНИРОВАНИЯ >>>
+import sys # Для проверки версии Python
+# <<< КОНЕЦ ДОБАВЛЕНЫ ИМПОРТЫ >>>
+from typing import List, Dict, Any, Optional, Tuple, Union # Добавили Union
 
 # --- Google Types ---
 # Импортируем типы Google. Ошибка импорта здесь критична для работы с моделью.
+# Если Python < 3.9, ast.unparse не будет доступен, что повлияет на инструменты, но не на базовый import
 try:
+    # Используем более специфичный импорт, если знаем, где находится RepeatedComposite
+    # или полагаемся на то, что он доступен после импорта glm
+    # https://github.com/googleapis/python-api-core/blob/main/google/api_core/protobuf_helpers.py
+    # или прямо из google.protobuf.internal.containers (как в оригинале)
+    # Проверим версию protobuf, если нужно
+
+    # Попробуем импортировать нужный класс напрямую
+    # Оставляем старый импорт, так как он используется в заглушке
+    from google.protobuf.internal.containers import RepeatedComposite as GoogleRepeatedComposite
+    # Проверяем, что импорт удался, прежде чем присваивать переменной
+    RepeatedComposite = GoogleRepeatedComposite
+    logger_types = logging.getLogger(__name__)
+    logger_types.debug("Successfully imported RepeatedComposite from google.protobuf.internal.containers.")
+except ImportError as e:
+    logger_types = logging.getLogger(__name__)
+    # Логируем критическую ошибку импорта RepeatedComposite
+    logger_types.critical(f"CRITICAL: Failed to import RepeatedComposite from google.protobuf.internal.containers: {e}", exc_info=True)
+    RepeatedComposite = Any # Определяем как Any, если импорт не удался
+
+
+try:
+    # Импортируем основные типы Google AI после попытки импорта RepeatedComposite
     from google.ai import generativelanguage as glm
-    # RepeatedComposite нужен для корректной обработки типов, возвращаемых Google API
-    from google.protobuf.internal.containers import RepeatedComposite
     Content = glm.Content
     Part = glm.Part
     FunctionResponse = glm.FunctionResponse
     FunctionCall = glm.FunctionCall
-    logger_types = logging.getLogger(__name__)
-    logger_types.debug("Successfully imported Google types and RepeatedComposite.")
+    logger_types.debug("Successfully imported Google AI core types (glm).")
 except ImportError as e:
-    logger_types = logging.getLogger(__name__)
-    logger_types.critical(f"CRITICAL: Failed to import Google AI types or protobuf dependencies in history_manager: {e}", exc_info=True)
-    # Определяем заглушки, но функционал, связанный с Content/Part, будет нарушен
-    RepeatedComposite = Any # Fallback
+    logger_types.warning(f"Could not import Google AI core types (glm): {e}. Setting core types to Any.", exc_info=True)
     Content = Any # Fallback
     Part = Any # Fallback
     FunctionResponse = Any # Fallback
     FunctionCall = Any # Fallback
-    # При такой ошибке модуль database, который тоже используется, может сбоить.
-    # Возможно, стоит пересмотреть зависимости или сделать импорт database здесь.
-    # Но пока оставим import database в отдельном блоке ниже, как было.
-    # Это позволит history_manager импортироваться, даже если типы Google не загрузились,
-    # но функции prepare_history/save_history должны будут проверить наличие database.
+
 
 # --- Database Module ---
 # Импортируем модуль базы данных. Ошибка здесь критична для хранения истории.
+# Этот импорт зависит от корректной настройки БД и драйвера (aiosqlite)
 try:
     import database
     logger_db = logging.getLogger(__name__)
@@ -42,22 +59,27 @@ except ImportError as e:
     logger_db = logging.getLogger(__name__)
     logger_db.critical(f"CRITICAL: Failed to import database module in history_manager: {e}", exc_info=True)
     database = None # type: ignore
-    # Этот импорт не должен сбоить из-за ошибки RepeatedComposite, если зависимость прописана верно.
-    # Если он сбоит, это другая проблема.
+    logging.warning("Database module unavailable. History functionality will be disabled.")
+
 
 # --- Utility Functions ---
-# Импортируем вспомогательные функции. Ошибка здесь также может быть критичной.
+# Импортируем вспомогательные функции из локальных модулей.
+# Эти импорты зависят от того, что utils.helpers и utils.converters
+# были успешно загружены на более ранних этапах импорта Python.
+# Их успешная загрузка, в свою очередь, может зависеть от импорта Google Types
+# внутри них (как мы видели в utils.converters.py).
 try:
-    # escape_markdown_v2 и remove_markdown нужны для форматирования логов и ответов
+    # escape_markdown_v2 и remove_markdown
     from utils.helpers import escape_markdown_v2, remove_markdown
-    # Функции конвертации для работы с JSON представлением истории в БД
+    # Функции конвертации
     from utils.converters import _deserialize_parts, reconstruct_content_object, _convert_part_to_dict, _convert_value_for_json
     logger_utils = logging.getLogger(__name__)
     logger_utils.debug("Successfully imported utility functions.")
 except ImportError as e:
     logger_utils = logging.getLogger(__name__)
-    logger_utils.critical(f"CRITICAL: Failed to import utility functions or converters in history_manager: {e}", exc_info=True)
-    # Определяем заглушки для базовой работоспособности
+    # Это предупреждение, но мы будем проверять availability этих функций перед использованием
+    logger_utils.warning(f"Could not import utility functions or converters in history_manager: {e}.", exc_info=True)
+    # Определяем заглушки, чтобы остальной код мог запуститься
     def escape_markdown_v2(text: Optional[str]) -> str: return text or "" # type: ignore
     def remove_markdown(text: Optional[str]) -> str: return text or "" # type: ignore
     def _deserialize_parts(parts_json: Optional[str]) -> List[Dict[str, Any]]: return [] # type: ignore
@@ -66,10 +88,14 @@ except ImportError as e:
     def _convert_value_for_json(value: Any) -> Any: return str(value) # type: ignore # Грубая заглушка
     logging.warning("Using mock utility functions in history_manager due to import errors.")
 
+# Проверяем, что импорт Content и Part удался, для использования в type hints и коде
+if Content is Any or Part is Any:
+     logging.warning("Google AI core types (Content, Part) are not available. History functionality will be limited.")
+
 
 logger = logging.getLogger(__name__) # Получаем основной логгер для этого модуля
 
-# Константы для обрезки вывода логов в истории
+# Константа для обрезки вывода логов в истории
 MAX_LOG_CONTEXT_LEN = 200
 MAX_FULL_RESULT_PREVIEW = 500
 
@@ -93,10 +119,15 @@ async def prepare_history(
     """
     logger.debug(f"Preparing history for chat={chat_id}, current_user={user_id}, chat_type={chat_type}, add_notes={add_notes}, add_logs={add_recent_logs}, log_limit={recent_logs_limit}")
 
-    # Проверка доступности БД и необходимых утилит
+    # Проверка доступности БД и необходимых утилит/типов перед началом работы
+    # Проверяем database и ключевые функции конвертации
     if database is None or _deserialize_parts is None or reconstruct_content_object is None or escape_markdown_v2 is None:
-         logger.critical("Database module or essential utility functions unavailable. Cannot prepare history.")
+         logger.critical("Database module or essential utility functions/types unavailable. Cannot prepare history.")
+         # Логи из предыдущих запусков показывают, что database и конвертеры могут быть None
+         # due to the RepeatedComposite error.
+         # Если эта ошибка возникла, возвращаем пустую историю и 0 записей.
          return [], 0 # Возвращаем пустую историю и 0 записей
+
 
     # 1. Получение данных из БД
     history_from_db: List[Dict[str, Any]] = []
@@ -106,10 +137,13 @@ async def prepare_history(
     original_db_len: int = 0 # Инициализируем
     try:
         # Получаем историю в виде словарей (как она хранится в БД)
-        history_from_db = await database.get_chat_history(chat_id) # Ожидаем List[Dict]
-        original_db_len = len(history_from_db) # <<< ЗАПОМИНАЕМ ОРИГИНАЛЬНУЮ ДЛИНУ ЗДЕСЬ
+        # Проверяем наличие функций перед вызовом на всякий случай
+        if hasattr(database, 'get_chat_history'):
+             history_from_db = await database.get_chat_history(chat_id) # Ожидаем List[Dict]
+             original_db_len = len(history_from_db) # <<< ЗАПОМИНАЕМ ОРИГИНАЛЬНУЮ ДЛИНУ ЗДЕСЬ
+        else: logger.warning("Database.get_chat_history unavailable.")
+
         if add_notes:
-            # Проверяем наличие функций перед вызовом
             if hasattr(database, 'get_user_profile'): user_profile = await database.get_user_profile(user_id)
             else: logger.warning("Database.get_user_profile unavailable.")
             if hasattr(database, 'get_user_notes'): user_notes = await database.get_user_notes(user_id, parse_json=True)
@@ -134,8 +168,8 @@ async def prepare_history(
     prepared_history_objects: List[Any] = []
 
     # --- Добавляем блок RAG (недавние логи) ---
-    if add_recent_logs and recent_logs:
-        # Используем escape_markdown_v2 для всего, что может содержать спецсимволы из логов
+    # Проверяем доступность escape_markdown_v2 перед использованием
+    if add_recent_logs and recent_logs and escape_markdown_v2:
         logs_str_parts = [escape_markdown_v2("~~~Недавние Выполненные Действия~~~")]
         added_log_count = 0
         # Используем reversed, чтобы последние логи были ближе к концу контекста
@@ -165,7 +199,6 @@ async def prepare_history(
                 try:
                     # Проверяем, содержится ли msg в full_result_json_str
                     if full_result_json_str and isinstance(full_result_json_str, str) and msg in full_result_json_str:
-                         # logger.debug(f"History Prep: Skipping result_message as it appears in full_result_json for '{tool_name}'.")
                          pass # Пропускаем msg, если он часть полного результата
                     else:
                         truncated_msg = (msg[:MAX_LOG_CONTEXT_LEN] + '...') if len(msg) > MAX_LOG_CONTEXT_LEN else msg
@@ -218,23 +251,22 @@ async def prepare_history(
             full_logs_str = "\n\n".join(logs_str_parts)
             try:
                 # Создаем Content объект для блока логов
-                # Используем glm.Part и glm.Content для надежности, если импортированы
-                logs_content = (
-                    glm.Content(role="model", parts=[glm.Part(text=full_logs_str)])
-                    if all([glm, glm.Part, glm.Content]) else (
-                         Content(role="model", parts=[Part(text=full_logs_str)]) if all([Content, Part]) else None
-                    )
-                )
-                if logs_content: prepared_history_objects.append(logs_content)
-                else: logger.warning("Failed to create log content object due to missing types.")
-
-                logger.info(f"Added {added_log_count} recent non-communication tool execution logs to history context for chat {chat_id}.")
+                # Проверяем, что необходимые типы доступны
+                if Content is not Any and Part is not Any:
+                    logs_content = Content(role="model", parts=[Part(text=full_logs_str)])
+                    prepared_history_objects.append(logs_content)
+                    logger.info(f"Added {added_log_count} recent non-communication tool execution logs to history context for chat {chat_id}.")
+                else:
+                    logger.warning("History Prep: Skipping adding log content due to missing Google AI types.")
             except Exception as logs_content_err:
                  logger.error(f"Failed to create Content object for recent logs: {logs_content_err}", exc_info=True)
+    elif add_recent_logs:
+        logger.warning("History Prep: Skipping adding recent logs context: escape_markdown_v2 unavailable.")
 
 
     # --- Добавляем контекст пользователя (профиль + заметки) ---
-    if add_notes and database and hasattr(database, 'get_user_profile') and hasattr(database, 'get_user_notes'):
+    # Проверяем доступность всех необходимых компонентов перед добавлением контекста пользователя
+    if add_notes and database is not None and hasattr(database, 'get_user_profile') and hasattr(database, 'get_user_notes') and escape_markdown_v2 is not None:
         user_data_str_parts = []
         context_added = False
         try:
@@ -278,27 +310,24 @@ async def prepare_history(
              full_context_str = escape_markdown_v2("~~~Контекст Текущего Пользователя~~~") + "\n" + "\n\n".join(user_data_str_parts)
              try:
                  # Создаем Content объект для блока контекста
-                 context_content = (
-                     glm.Content(role="model", parts=[glm.Part(text=full_context_str)])
-                     if all([glm, glm.Part, glm.Content]) else (
-                         Content(role="model", parts=[Part(text=full_context_str)]) if all([Content, Part]) else None
-                     )
-                 )
-                 if logs_content: prepared_history_objects.append(context_content)
-                 else: logger.warning("Failed to create user context content object due to missing types.")
-
-                 logger.info(f"Added combined profile/notes context for current user {user_id} in chat {chat_id}.")
+                 # Проверяем, что необходимые типы доступны
+                 if Content is not Any and Part is not Any:
+                     context_content = Content(role="model", parts=[Part(text=full_context_str)])
+                     prepared_history_objects.append(context_content)
+                     logger.info(f"Added combined profile/notes context for current user {user_id} in chat {chat_id}.")
+                 else:
+                      logger.warning("History Prep: Skipping adding user context content due to missing Google AI types.")
              except Exception as context_err:
                  logger.error(f"Failed to create Content object for user context: {context_err}", exc_info=True)
     elif add_notes:
-        logger.warning("Skipping adding user notes/profile context: Database module or necessary functions unavailable.")
+        logger.warning("History Prep: Skipping adding user notes/profile context: Database module or necessary functions unavailable.")
 
 
     # --- Добавляем историю сообщений из БД (ИЗ ПОЛНОГО СПИСКА) ---
     processed_db_entries_count = 0
     # ИСПОЛЬЗУЕМ history_from_db БЕЗ ФИЛЬТРАЦИИ
     # Проверяем, что reconstruct_content_object и _deserialize_parts доступны
-    if reconstruct_content_object and _deserialize_parts:
+    if reconstruct_content_object and _deserialize_parts and Content is not Any and Part is not Any:
         for entry in history_from_db:
             role = entry.get("role")
             parts_json_str = entry.get("parts_json") # Получаем строку JSON
@@ -321,15 +350,17 @@ async def prepare_history(
             if reconstructed_content and getattr(reconstructed_content, 'role', None) == role:
                  # Добавляем префикс пользователя (если нужно)
                  # Добавляем префикс ТОЛЬКО К СООБЩЕНИЯМ ПОЛЬЗОВАТЕЛЕЙ, если чат не личный
-                 if role == 'user' and db_user_id is not None and chat_type != ChatType.PRIVATE:
+                 # Проверяем, что escape_markdown_v2 доступен перед использованием
+                 if role == 'user' and db_user_id is not None and chat_type != ChatType.PRIVATE and escape_markdown_v2 is not None:
                      try:
                          # Ищем текстовую часть для добавления префикса и модифицируем ее
                          # Убедимся, что glm и glm.Part доступны, если используем их.
                          if all([glm, glm.Part]):
                              new_parts_for_user_entry = []
                              prefix_added = False
+                             # Итерируемся по частям, чтобы найти текстовую
                              for original_part in reconstructed_content.parts:
-                                  # Проверяем тип Part
+                                  # Проверяем тип Part и наличие текста
                                   if isinstance(original_part, glm.Part) and hasattr(original_part, 'text') and isinstance(original_part.text, str):
                                       # Создаем новую Part с префиксом
                                       prefixed_text = f"User {db_user_id}: {original_part.text}"
@@ -346,11 +377,12 @@ async def prepare_history(
                                   # Создаем новый Content объект с модифицированными частями
                                   reconstructed_content = glm.Content(role='user', parts=new_parts_for_user_entry)
                                   logger.debug(f"Added user prefix for chat {chat_id}, user {db_user_id}.")
-                             # else: logger.debug(...) # Нет текстовых частей для префикса
+                             else:
+                                logger.debug(f"History Prep: Could not add user prefix for chat {chat_id}, user {db_user_id}: No text part found in reconstructed Content.")
 
                          elif Content and Part: # Fallback с заглушками Part/Content
                               # Логика с заглушками будет проще, но менее надежной
-                              # Можно пропустить добавление префикса в этом случае
+                              # Пропустим добавление префикса в этом случае
                               logger.warning("History Prep: Skipping user prefix due to missing Google types.")
                          else:
                              logger.warning("History Prep: Skipping user prefix due to missing Google or fallback types.")
@@ -358,15 +390,25 @@ async def prepare_history(
 
                      except Exception as prefix_err:
                          logger.error(f"Error adding user prefix to reconstructed content: {prefix_err}", exc_info=True)
+                         # Продолжаем, даже если не удалось добавить префикс
 
                  # Добавляем обработанный (возможно, с префиксом) Content объект
                  prepared_history_objects.append(reconstructed_content)
                  processed_db_entries_count += 1
+
             else:
                 logger.warning(f"History Prep: Skipped DB entry for role '{role}' because reconstruction failed or returned None/wrong role.")
+                # Можно добавить запись-заглушку об ошибке в историю, чтобы модель видела, что был пропуск
+                # Проверяем, что Content и Part доступны перед созданием заглушки
+                if Content is not Any and Part is not Any:
+                    error_content = Content(role="model", parts=[Part(text=f"Internal Error: Failed to reconstruct history entry for role '{role}'.")])
+                    prepared_history_objects.append(error_content)
+                    logger.warning(f"History Prep: Added error placeholder for role '{role}'.")
+
+
         logger.debug(f"History Prep: Finished processing {processed_db_entries_count} entries from DB history. Prepared {len(prepared_history_objects)} Content objects.")
     else:
-        logger.critical("History Prep: Skipping DB history processing: _deserialize_parts or reconstruct_content_object unavailable.")
+        logger.critical("History Prep: Skipping DB history processing: _deserialize_parts, reconstruct_content_object, or Google AI types unavailable.")
 
 
     final_history_for_api = prepared_history_objects
@@ -399,7 +441,7 @@ async def save_history(
         last_sent_message_text (Optional[str]): Текст ПОСЛЕДНЕГО сообщения пользователя,
             которое было отправлено модели в ЭТОМ цикле (сейчас не используется, но принято для совместимости).
     """
-    # Проверка доступности БД и необходимых утилит/типов
+    # Проверка доступности БД и необходимых утилит/типов перед началом работы
     if database is None or _convert_part_to_dict is None or _convert_value_for_json is None or Content is Any: # Проверяем, что Content не заглушка
          logger.critical(f"Database module or essential utility functions/types unavailable. Cannot save history for chat {chat_id}.")
          return
@@ -426,6 +468,10 @@ async def save_history(
          logger.critical("Database.add_message_to_history function unavailable. Cannot save history.")
          return
 
+    # Проверяем, доступен ли RepeatedComposite для проверки типа Parts
+    is_repeated_composite = lambda obj: isinstance(obj, RepeatedComposite) if RepeatedComposite is not Any else False
+
+
     for entry_content in new_history_entries_content:
         # Проверка, что это Content объект (на всякий случай)
         if not isinstance(entry_content, (glm.Content if glm else Content)):
@@ -435,6 +481,7 @@ async def save_history(
         role = getattr(entry_content, 'role', None)
         parts_obj_list = getattr(entry_content, 'parts', None) # Получаем список частей
 
+        # Проверяем, что parts_obj_list является списком, кортежем или RepeatedComposite
         if not role or parts_obj_list is None or not isinstance(parts_obj_list, (list, tuple, RepeatedComposite)):
             logger.warning(f"Save History: Skipping invalid Content entry (missing role or parts): {entry_content}")
             continue
@@ -457,13 +504,18 @@ async def save_history(
                 # Шаг 1: Конвертируем объекты Part в словари Python
                 # Используем _convert_part_to_dict, которая должна обрабатывать все типы Part (text, function_call, function_response)
                 # Она возвращает None для пустых или некорректных частей.
-                for part_obj in parts_obj_list:
-                    converted_part_dict = _convert_part_to_dict(part_obj)
-                    if converted_part_dict is not None:
-                        parts_list_of_dicts.append(converted_part_dict)
-                    else:
-                         logger.debug(f"Save History: Skipping part conversion result (None) for role '{role}'. Part object type: {type(part_obj)}")
-
+                # Проверяем, доступен ли _convert_part_to_dict
+                if _convert_part_to_dict is not None:
+                     for part_obj in parts_obj_list:
+                         converted_part_dict = _convert_part_to_dict(part_obj)
+                         if converted_part_dict is not None:
+                             parts_list_of_dicts.append(converted_part_dict)
+                         else:
+                              logger.debug(f"Save History: Skipping part conversion result (None) for role '{role}'. Part object type: {type(part_obj)}")
+                else:
+                     logger.critical("Save History: _convert_part_to_dict unavailable. Cannot convert parts for saving.")
+                     # Пропускаем сохранение этой записи
+                     continue
 
                 # <<< ИСПРАВЛЕНО: Удалена логика условной фильтрации >>>
                 # Теперь parts_list_of_dicts содержит все части (текст, FC, FR), которые удалось сконвертировать.
@@ -475,9 +527,10 @@ async def save_history(
                 # Шаг 2: Сериализуем список словарей в JSON строку
                 parts_json_str = "[]" # Значение по умолчанию
                 # Сериализуем, только если список не пустой (после конвертации)
+                # Проверяем, доступен ли _convert_value_for_json перед использованием в default
                 if filtered_parts_for_db:
                     try:
-                        parts_json_str = json.dumps(filtered_parts_for_db, ensure_ascii=False, default=str) # default=str на всякий случай
+                        parts_json_str = json.dumps(filtered_parts_for_db, ensure_ascii=False, default=(_convert_value_for_json if _convert_value_for_json else str)) # Используем str как fallback для default
                         logger.debug(f"Save History (model): Serialized parts for DB (size: {len(parts_json_str)}): {parts_json_str[:200]}...")
                     except Exception as serialize_err:
                         logger.error(f"Save History (model): Failed to serialize parts list to JSON: {serialize_err}. Saving empty list.", exc_info=True)
@@ -492,14 +545,20 @@ async def save_history(
                 # Шаг 3: Сохраняем в БД
                 try:
                     # Вызываем add_message_to_history с уже готовой JSON строкой
-                    await database.add_message_to_history(
-                        chat_id=chat_id,
-                        user_id=current_user_id, # Сохраняем ID пользователя, который инициировал диалог
-                        role=role,
-                        parts=parts_json_str # Передаем СТРОКУ JSON
-                    )
-                    logger.info(f"Save History: Successfully saved 'model' entry (incl. text, FC, FR) to chat_history for chat {chat_id}. JSON size: {len(parts_json_str)}.")
-                    save_count += 1
+                    # Проверяем наличие функции перед вызовом
+                    if hasattr(database, 'add_message_to_history'):
+                         await database.add_message_to_history(
+                             chat_id=chat_id,
+                             user_id=current_user_id, # Сохраняем ID пользователя, который инициировал диалог
+                             role=role,
+                             parts=parts_json_str # Передаем СТРОКУ JSON
+                         )
+                         logger.info(f"Save History: Successfully saved 'model' entry (incl. text, FC, FR) to chat_history for chat {chat_id}. JSON size: {len(parts_json_str)}.")
+                         save_count += 1
+                    else:
+                         logger.critical("Save History: Database.add_message_to_history function unavailable during save loop.")
+
+
                 # Обработка ошибок базы данных (остается прежней)
                 except TypeError as te:
                      logger.critical(f"Save History: TYPE ERROR calling add_message_to_history for 'model' entry (chat {chat_id}): {te}. Check arguments! Passed parts type: {type(parts_json_str)}, value: {parts_json_str[:100]}...", exc_info=True)
