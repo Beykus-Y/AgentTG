@@ -8,6 +8,12 @@ import sys # Для проверки версии Python
 # <<< КОНЕЦ ДОБАВЛЕНЫ ИМПОРТЫ >>>
 from typing import List, Dict, Any, Optional, Tuple, Union # Добавили Union
 
+
+try:
+    from aiogram.enums import ChatType # Импортируем ChatType непосредственно здесь
+except ImportError:
+    logging.getLogger(__name__).warning("Could not import ChatType from aiogram.enums. Using Any fallback.", exc_info=True)
+    ChatType = Any # Заглушка
 # --- Google Types ---
 # Импортируем типы Google. Ошибка импорта здесь критична для работы с моделью.
 # Если Python < 3.9, ast.unparse не будет доступен, что повлияет на инструменты, но не на базовый import
