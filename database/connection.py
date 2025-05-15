@@ -139,7 +139,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS chat_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('user', 'model', 'system', 'function')),
+                role TEXT NOT NULL CHECK(role IN ('user', 'model', 'system', 'function', 'assistant', 'tool')),
                 user_id INTEGER, -- NULL для 'model', 'system' и 'function'
                 parts_json TEXT NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,

@@ -3,6 +3,7 @@
 import logging
 import os
 import asyncio
+from typing import Optional, Tuple
 
 # --- Aiogram и зависимости ---
 dependencies_ok = True
@@ -10,29 +11,23 @@ try:
     from aiogram import F, types, Bot, Router
     from aiogram.enums import ContentType, ChatType, ParseMode
     from aiogram.exceptions import TelegramAPIError
+    import aiofiles
+    # Импортируем систему БД для сохранения сообщений пользователей и профилей
+    import database
+    from database.crud_ops.profiles import upsert_user_profile
+    from database.crud_ops.history import add_message_to_history
+    import json
 except ImportError as e:
     logging.critical(f"CRITICAL: Failed to import aiogram components in file_handler: {e}", exc_info=True)
-    dependencies_ok = False
-
-# --- Локальные импорты ---
-try:
-    # Утилиты
-    from utils.helpers import escape_markdown_v2
-    # Менеджер окружения
-    from services.env_manager import get_safe_chat_path
-    # Bot instance
-    from bot_loader import bot as bot_instance # Импортируем как bot_instance, чтобы не конфликтовать
-    # Async file operations
-    import aiofiles
-    import aiofiles.os
-except ImportError as e:
-    logging.critical(f"CRITICAL: Failed to import local dependencies in file_handler: {e}", exc_info=True)
     dependencies_ok = False
     # Заглушки для базовой работы логгера
     def escape_markdown_v2(text: str) -> str: return text
     async def get_safe_chat_path(*args, **kwargs): return False, None
     bot_instance = None
     aiofiles = None
+    database = None
+    async def upsert_user_profile(*args, **kwargs): pass
+    async def add_message_to_history(*args, **kwargs): pass
 
 
 logger = logging.getLogger(__name__)
@@ -83,8 +78,34 @@ if dependencies_ok and router and aiofiles:
 
         user_id = message.from_user.id
         chat_id = message.chat.id
+        chat_type = message.chat.type
         document = message.document
         original_filename = document.file_name or f"file_{document.file_unique_id}.unknown"
+        
+        # Сохраняем документы из групповых чатов в базу данных для сохранения контекста
+        if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            try:
+                # Сначала обновляем профиль пользователя
+                if database and hasattr(database, 'upsert_user_profile'):
+                    await upsert_user_profile(
+                        user_id=user_id,
+                        username=message.from_user.username,
+                        first_name=message.from_user.first_name,
+                        last_name=message.from_user.last_name
+                    )
+                
+                # Затем сохраняем документ в историю
+                if database and hasattr(database, 'add_message_to_history'):
+                    parts_json = create_file_parts_json(document)
+                    await add_message_to_history(
+                        chat_id=chat_id,
+                        role="user",
+                        user_id=user_id,
+                        parts=parts_json
+                    )
+                    logger.debug(f"Saved document message from user {user_id} to chat history (chat_id={chat_id})")
+            except Exception as save_err:
+                logger.error(f"Error saving document message to history: {save_err}", exc_info=True)
 
         # --- Определяем путь для сохранения --- (Отступ 4 пробела)
         try:
@@ -163,3 +184,23 @@ if router and dependencies_ok and aiofiles:
     logger.info("--- file_handler.py loaded successfully. Router OK. Handler registered. ---")
 else:
     logger.error("--- file_handler.py failed to load properly (check logs for missing dependencies or router errors). ---")
+
+# Функция для создания parts_json с информацией о файле
+def create_file_parts_json(document: types.Document) -> str:
+    """Создает parts_json с информацией о документе для записи в БД."""
+    parts = []
+    
+    # Добавляем caption документа, если есть
+    if document.caption:
+        parts.append({"type": "text", "content": document.caption})
+    
+    # Добавляем информацию о файле
+    parts.append({
+        "type": "document", 
+        "file_id": document.file_id,
+        "file_name": document.file_name or f"file_{document.file_unique_id}.unknown",
+        "mime_type": document.mime_type,
+        "file_size": document.file_size
+    })
+    
+    return json.dumps(parts, ensure_ascii=False)

@@ -31,7 +31,8 @@ async def add_message_to_history(
     Добавляет сообщение в историю чата.
     `parts` должен быть валидной JSON строкой.
     """
-    if role not in ('user', 'model', 'system', 'function'):
+    # ИСПРАВЛЕНО: Добавлены роли 'assistant' и 'tool' для поддержки OpenAI API
+    if role not in ('user', 'model', 'system', 'function', 'assistant', 'tool'):
         logger.error(f"Invalid role '{role}' provided for chat history (chat_id: {chat_id}).")
         return
 
@@ -47,12 +48,12 @@ async def add_message_to_history(
     # -------------------------------
 
     # <<< Переносим проверку на пустой JSON сюда (для роли model) >>>
-    if parts_json == "[]" and role != 'model':
-         # Оставляем ошибку для не-model ролей, если исходные parts НЕ были пустыми
+    if parts_json == "[]" and role != 'model' and role != 'assistant':
+         # Оставляем ошибку для не-model/не-assistant ролей, если исходные parts НЕ были пустыми
          logger.error(f"Serialization resulted in empty JSON '[]' for non-empty parts chat={chat_id}, role={role}. History not saved.")
          return
-    elif parts_json == "[]" and role == 'model':
-         logger.info(f"Saving history entry for model with empty parts (parts_json='[]') for chat={chat_id}.")
+    elif parts_json == "[]" and (role == 'model' or role == 'assistant'):
+         logger.info(f"Saving history entry for {role} with empty parts (parts_json='[]') for chat={chat_id}.")
     # elif parts_json != "[]":
          # logger.debug(f"Serialized parts to JSON (size: {len(parts_json)}) for chat={chat_id}, role={role}")
 

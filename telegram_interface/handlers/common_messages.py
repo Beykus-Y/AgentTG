@@ -65,6 +65,11 @@ try:
     handle_user_request = core_handle_user_request
     logger_cm.info("Imported core_agent.agent_processor.handle_user_request successfully.")
 
+    # Импортируем систему БД для сохранения сообщений пользователей и профилей
+    import database
+    from database.crud_ops.profiles import upsert_user_profile
+    from database.crud_ops.history import add_message_to_history
+
 except ImportError as e:
     logger_cm.critical(f"CRITICAL: ImportError during common_messages setup! Error: {e}", exc_info=True)
     dependencies_ok = False
@@ -106,8 +111,6 @@ if dependencies_ok and router:
             Обрабатывает текстовые сообщения в ЛС и группах.
             Передает управление в ядро агента (handle_user_request).
             """
-            # Стало:
-
             logger_cm.info(f"!!! HANDLER process_text_message TRIGGERED for message {message.message_id} !!!")# <--- ВАЖНЫЙ ЛОГ
 
             # Проверка доступности handle_user_request (на всякий случай)
@@ -125,8 +128,15 @@ if dependencies_ok and router:
             if not user or user.is_bot:
                 logger_cm.debug(f"Handler ignoring message from bot or without user in chat {message.chat.id}")
                 return
-
+                
+            # Получаем базовую информацию о сообщении (для логов)
+            chat_id = message.chat.id
+            user_id = user.id
+            chat_type = message.chat.type
             
+            # ПРИМЕЧАНИЕ: Блок сохранения сообщений групповых чатов УДАЛЕН,
+            # т.к. эта функциональность теперь реализована в MessageSaverMiddleware
+            # и происходит до вызова этого хендлера
 
             # Вызов Ядра Агента
             core_response_text_processed: Optional[str] = None
@@ -182,3 +192,9 @@ elif router is None and dependencies_ok:
      logger_cm.error("--- common_messages.py loaded, dependencies OK, BUT ROUTER IS NONE! ---")
 else:
     logger_cm.error("--- common_messages.py failed to load properly (router or dependencies failed). Check CRITICAL logs. ---")
+
+# Функция для преобразования текстового сообщения Telegram в JSON parts для БД
+def _message_text_to_parts_json(text: str) -> str:
+    """Преобразует текст сообщения в parts_json для сохранения в БД."""
+    import json
+    return json.dumps([{"type": "text", "content": text}], ensure_ascii=False)

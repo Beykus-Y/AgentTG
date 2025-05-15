@@ -285,3 +285,38 @@ async def generate_image_description(
     except Exception as e:
         logger.error(f"Error generating image description: {e}", exc_info=True)
         return None
+
+
+# --- Вспомогательная функция для добавления сообщения модели в историю ---
+def add_model_content_to_history(
+    chat_session: Any,
+    content: Any  # GoogleContent
+) -> None:
+    """
+    Добавляет сообщение модели в историю сессии.
+    Эта функция синхронная и предназначена для вызова через loop.run_in_executor.
+
+    Args:
+        chat_session: Активная сессия чата genai.ChatSession.
+        content: Объект Content с сообщением модели.
+    """
+    if not chat_session:
+        logger.error("Cannot add model content: chat_session is None.")
+        return
+    if not content:
+        logger.error("Cannot add model content: content is None.")
+        return
+    
+    try:
+        # В сессии Google нет прямого метода для добавления сообщения модели в историю
+        # Мы добавляем его, эмулируя ответ модели вручную
+        history = getattr(chat_session, 'history', [])
+        if not isinstance(history, list):
+            logger.error(f"Chat session history is not a list: {type(history)}")
+            return
+        
+        # Добавляем сообщение модели в историю
+        history.append(content)
+        logger.info("Added model content to history successfully.")
+    except Exception as e:
+        logger.error(f"Error adding model content to history: {e}", exc_info=True)

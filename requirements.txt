@@ -1,5 +1,3 @@
-# Agent Project Requirements
-
 # --- Core Framework ---
 aiogram>=3.4.0 # Используем актуальную версию aiogram (на момент создания)
 pydantic>=2.0.0
@@ -10,6 +8,7 @@ google-generativeai>=0.5.0 # Актуальная версия Gemini API
 google-api-python-client # Зависимость для google-generativeai
 google-auth # Зависимость для google-generativeai
 protobuf # Зависимость для google-generativeai
+openai
 
 # --- Database ---
 aiosqlite>=0.17.0 # Асинхронный драйвер SQLite

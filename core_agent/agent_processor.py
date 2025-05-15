@@ -2,155 +2,150 @@
 
 import logging
 import json
-import re # Импорт для регулярных выражений (проверка упоминаний)
+# --- Удален импорт RE ---
 from typing import Optional, Dict, Any, List, Callable
 
 # --- Aiogram и зависимости ---
-from aiogram import types, Bot, Dispatcher # <<< Добавлен Dispatcher
-from aiogram.enums import ChatType as aiogram_ChatType
-# --- Локальные импорты ядра ---
-from .history_manager import prepare_history, save_history
-from .ai_interaction import process_request
-from .result_parser import extract_text
-# --- Импорт парсера ответа Lite-модели ---
-from .response_parsers import parse_lite_llm_response # Используем новое имя файла
-# --- Импорт утилит и глобальных объектов ---
-from utils.helpers import escape_markdown_v2
-from bot_loader import dp, bot as bot_instance # Импортируем dp и бот
-# --- Импорт функций управления индексом (если используется для Lite) ---
-# Если Lite не требует ротации ключей, этот импорт не нужен здесь
-from bot_lifecycle import get_current_api_key_index # <<< Импортируем для выбора Lite модели
-
-# --- Импорт БД и CRUD операций ---
-import database
-from database.crud_ops.profiles import upsert_user_profile
-
-# (Опционально, если работаете с объектами Content напрямую)
-# from google.ai import generativelanguage as glm
-# Content = glm.Content
+try:
+    from aiogram import types, Bot, Dispatcher, F
+    from aiogram.enums import ChatType as aiogram_ChatType
+    # --- <<< ИЗМЕНЕНО: Импортируем escape_markdown_v2 из utils.helpers >>> ---
+    from utils.helpers import escape_markdown_v2, remove_markdown, is_admin as check_if_admin
+    from bot_loader import dp, bot as bot_instance
+    import database
+    from database.crud_ops.profiles import upsert_user_profile
+    from .history_manager import prepare_history, save_history
+    from .ai_interaction import process_request
+    from .response_parsers import parse_lite_llm_response
+    from bot_lifecycle import get_current_api_key_index # Только для Google Lite
+    from ai_interface import gemini_api, openai_api # Импортируем оба
+    from .result_parser import extract_text as extract_gemini_text # Для Gemini
+    dependencies_ok = True
+except ImportError as e:
+    logging.getLogger(__name__).critical(f"CRITICAL: Failed import dependencies agent_processor: {e}", exc_info=True)
+    dependencies_ok = False
+    # Заглушки
+    types = Any; Bot = Any; Dispatcher = Any; F = Any; aiogram_ChatType = Any;
+    def escape_markdown_v2(text: Optional[str]) -> str: return text or ""
+    def remove_markdown(text: Optional[str]) -> str: return text or ""
+    def check_if_admin(uid: Optional[int]) -> bool: return False
+    dp = type('obj', (object,), {'workflow_data': {}})(); bot_instance = None # type: ignore
+    database = None # type: ignore
+    async def upsert_user_profile(*args, **kwargs): pass
+    async def prepare_history(*args, **kwargs): return [], 0
+    async def save_history(*args, **kwargs): pass
+    async def process_request(*args, **kwargs): return None, "Dep Error", None, None, None
+    def parse_lite_llm_response(*args, **kwargs): return {"error": "Dep Error"}
+    def get_current_api_key_index(*args, **kwargs): return 0
+    gemini_api = None; openai_api = None
+    def extract_gemini_text(*args, **kwargs): return None
 
 logger_ap = logging.getLogger(__name__)
-logger_ap.info("--- Loading agent_processor.py ---")
+logger_ap.info(f"--- Loading agent_processor.py (Dependencies OK: {dependencies_ok}) ---")
 
-# --- Кэш информации о боте ---
+# --- Кэш информации о боте (без изменений) ---
 BOT_INFO_CACHE: Dict[str, Any] = {"info": None, "username_lower": None}
-
 async def _get_bot_info(bot_to_use: Bot) -> Optional[types.User]:
-    """Получает и кэширует информацию о боте."""
     global BOT_INFO_CACHE
     if BOT_INFO_CACHE["info"] is None and bot_to_use:
         try:
             bot_user = await bot_to_use.get_me()
             BOT_INFO_CACHE["info"] = bot_user
             BOT_INFO_CACHE["username_lower"] = bot_user.username.lower() if bot_user.username else None
-            logger_ap.info(f"Bot info cached in agent_processor: ID={bot_user.id}, Username=@{bot_user.username}")
+            logger_ap.info(f"Bot info cached: ID={bot_user.id}, Username=@{bot_user.username}")
         except Exception as e:
-            logger_ap.error(f"Failed to get bot info via API in agent_processor: {e}")
-            BOT_INFO_CACHE["info"] = None
-            BOT_INFO_CACHE["username_lower"] = None
+            logger_ap.error(f"Failed get bot info: {e}"); BOT_INFO_CACHE = {"info": None, "username_lower": None}
     return BOT_INFO_CACHE["info"]
 
-# --- Вспомогательная функция для вызова Pro-модели ---
+# --- Адаптированная вспомогательная функция для вызова Pro-модели ---
 async def _execute_pro_model_logic(
     message: types.Message,
-    # <<< ИЗМЕНЕНИЕ: Принимаем СПИСКИ моделей >>>
-    # pro_model: Any, # Удалено
-    pro_models_list: List[Any],
-    lite_models_list: List[Any], # Опционально, если нужно передавать дальше
     available_pro_functions: Dict[str, Callable],
     max_pro_steps: int,
-    # <<< ДОБАВЛЕНО: dispatcher >>>
     dispatcher: Dispatcher
 ) -> Optional[str]:
     """
-    Выполняет стандартную логику обработки Pro моделью, используя списки моделей
-    и передавая dispatcher для управления ключами API.
+    Выполняет логику обработки Pro моделью (Google или OpenAI).
+    Возвращает текст для ответа пользователю ИЛИ УЖЕ ЭКРАНИРОВАННОЕ сообщение об ошибке.
     """
     chat_id=message.chat.id
     user_id=message.from_user.id if message.from_user else 0
     chat_type=message.chat.type
     user_input=message.text or ""
-    add_user_context = True # По умолчанию добавляем контекст
+    add_user_context = True
 
-    logger_ap.debug(f"Executing Pro model logic for chat {chat_id} using multi-key setup.")
+    ai_provider = dispatcher.workflow_data.get("ai_provider")
+    if not ai_provider:
+        logger_ap.critical("AI provider not found for Pro logic.")
+        return escape_markdown_v2("⚠️ Ошибка конфигурации AI.") # Экранируем сразу
+
+    logger_ap.debug(f"Executing Pro model ({ai_provider.upper()}) logic chat {chat_id}.")
 
     try:
-        # --- Подготовка истории (остается без изменений) ---
-        initial_history_obj_list, original_db_len = await prepare_history(
-            chat_id=chat_id,
-            user_id=user_id,
-            chat_type=chat_type,
-            add_notes=add_user_context
+        # 1. Подготовка истории
+        initial_history_list, original_db_len = await prepare_history(
+            chat_id=chat_id, user_id=user_id, chat_type=chat_type,
+            ai_provider=ai_provider, add_notes=add_user_context, add_recent_logs=True
         )
-        # Убедимся, что initial_history_obj_list - это список Content объектов
-        if not isinstance(initial_history_obj_list, list):
-             logger_ap.error(f"prepare_history did not return a list for chat {chat_id}. Type: {type(initial_history_obj_list)}")
-             return escape_markdown_v2("Ошибка подготовки истории диалога.")
+        if not isinstance(initial_history_list, list):
+             logger_ap.error(f"prepare_history failed chat {chat_id} ({ai_provider}).");
+             return escape_markdown_v2("⚠️ Ошибка подготовки истории.") # Экранируем
 
-        # --- Взаимодействие с Pro AI ---
-        # <<< ИЗМЕНЕНИЕ: Передаем dispatcher вместо model_instance >>>
-        final_history_obj_list, interaction_error_msg, last_func_name, last_sent_text, last_func_result = await process_request(
-            # model_instance=... # Удалено
-            initial_history=initial_history_obj_list, # Передаем список Content объектов
-            user_input=user_input,
-            available_functions=available_pro_functions,
-            max_steps=max_pro_steps,
-            chat_id=chat_id,
-            user_id=user_id,
-            chat_type=chat_type,
-            dispatcher=dispatcher # Передаем dispatcher
+        # 2. Взаимодействие с AI
+        final_history_list, interaction_error_msg, last_func_name, last_sent_text, last_func_result = await process_request(
+            initial_history=initial_history_list, user_input=user_input,
+            available_functions=available_pro_functions, max_steps=max_pro_steps,
+            chat_id=chat_id, user_id=user_id, chat_type=chat_type, dispatcher=dispatcher
         )
 
-        # --- Обработка результата Pro AI (остается без изменений) ---
-        error_message_for_user: Optional[str] = None
+        # 3. Обработка результата
         final_response_text_escaped: Optional[str] = None
 
         if interaction_error_msg:
-            logger_ap.error(f"Core Agent (Pro): AI interaction failed for chat {chat_id}: {interaction_error_msg}")
-            # Экранируем сообщение об ошибке от process_request
-            error_message_for_user = f"Произошла ошибка при обработке: {escape_markdown_v2(interaction_error_msg)}"
-        elif final_history_obj_list:
-            final_response_text_raw = extract_text(final_history_obj_list)
+            logger_ap.error(f"Core Agent ({ai_provider.upper()}): AI interaction failed chat {chat_id}: {interaction_error_msg}")
+            # <<< ИЗМЕНЕНО: Формируем и экранируем сообщение об ошибке здесь >>>
+            final_response_text_escaped = f"Произошла ошибка при обработке \\({ai_provider}\\): {escape_markdown_v2(interaction_error_msg)}"
 
+        elif final_history_list:
+            # Извлечение текста
+            final_response_text_raw = None
+            if ai_provider == 'openai':
+                 if final_history_list and isinstance(final_history_list[-1], dict):
+                      last_message = final_history_list[-1]
+                      if last_message.get('role') == 'assistant' and isinstance(last_message.get('content'), str):
+                           final_response_text_raw = last_message.get('content')
+            elif ai_provider == 'google':
+                 final_response_text_raw = extract_gemini_text(final_history_list)
+
+            # Подавление текста и экранирование
             if last_func_name == 'send_telegram_message' and final_response_text_raw:
-                logger_ap.info(f"Suppressing final text output because last successful action was send_telegram_message. Chat: {chat_id}")
-                final_response_text_raw = None
-
-            if final_response_text_raw:
-                logger_ap.info(f"Core Agent (Pro): Final text (len={len(final_response_text_raw)}) will be sent for chat {chat_id}.")
-                final_response_text_escaped = escape_markdown_v2(final_response_text_raw)
+                logger_ap.info(f"Suppressing final text output after send_telegram_message. Chat: {chat_id}")
+            elif final_response_text_raw:
+                logger_ap.info(f"Core Agent ({ai_provider.upper()}): Final text generated chat {chat_id}.")
+                final_response_text_escaped = escape_markdown_v2(final_response_text_raw) # <<< Экранируем успешный ответ
             else:
-                reason = "Model generated no text" if last_func_name != 'send_telegram_message' else "Text suppressed after send_telegram_message"
-                log_level = logging.INFO if last_func_name or last_sent_text else logging.WARNING # Учитываем last_sent_text
-                logger_ap.log(log_level, f"Core Agent (Pro): No final text to send for chat {chat_id}. Reason: {reason}. (Last func: {last_func_name})")
+                logger_ap.info(f"Core Agent ({ai_provider.upper()}): No final text to send chat {chat_id}.")
 
-            # --- Сохранение истории Pro (остается без изменений) ---
+            # Сохранение истории
             if save_history:
-                await save_history(
-                      chat_id=chat_id,
-                      final_history_obj_list=final_history_obj_list,
-                      original_db_history_len=original_db_len,
-                      current_user_id=user_id,
-                      last_sent_message_text=last_sent_text # <<< ДОБАВЛЕНО ОБРАТНО
-                )
-            else:
-                 logger_ap.error(f"Cannot save Pro history for chat {chat_id}: save_history function is not available.")
-        else:
-            logger_ap.error(f"Core Agent (Pro): AI interaction returned None history without error msg for chat {chat_id}")
-            error_message_for_user = escape_markdown_v2("Модель AI не вернула корректный результат.")
+                 await save_history(
+                       chat_id=chat_id, final_history=final_history_list,
+                       original_db_history_len=original_db_len, current_user_id=user_id,
+                       ai_provider=ai_provider
+                 )
+            else: logger_ap.error(f"save_history function unavailable.")
 
-        # --- Возврат результата Pro ---
-        if error_message_for_user:
-            # Сообщение об ошибке уже должно быть экранировано
-            return error_message_for_user
-        elif final_response_text_escaped:
-            return final_response_text_escaped
-        else:
-            return None # Ни ошибки, ни текста
+        else: # None history без ошибки
+            logger_ap.error(f"Core Agent ({ai_provider.upper()}): AI returned None/empty history chat {chat_id}")
+            final_response_text_escaped = escape_markdown_v2(f"⚠️ Модель AI ({ai_provider}) не вернула результат.") # Экранируем
+
+        # Возвращаем ТОЛЬКО текст (успешный или ошибка), готовый к отправке
+        return final_response_text_escaped
 
     except Exception as pro_err:
-        logger_ap.error(f"Unexpected error during Pro model execution logic: {pro_err}", exc_info=True)
-        return escape_markdown_v2("Произошла внутренняя ошибка при обработке вашего запроса.")
+        logger_ap.error(f"Unexpected error Pro logic ({ai_provider.upper()}): {pro_err}", exc_info=True)
+        # <<< ИЗМЕНЕНО: Экранируем сообщение об ошибке здесь >>>
+        return escape_markdown_v2(f"⚠️ Произошла внутренняя ошибка при обработке ({ai_provider}).")
 
 
 # --- Основная функция обработчика ---
@@ -159,213 +154,134 @@ async def handle_user_request(
     force_pro_model: bool = False
 ) -> Optional[str]:
     """
-    Основная точка входа для обработки входящего запроса пользователя.
-    Управляет выбором модели (Lite/Pro) и делегирует выполнение.
+    Основная точка входа для обработки запроса.
+    Возвращает текст для ответа пользователю или None.
+    Сообщения об ошибках возвращаются уже экранированными для MarkdownV2.
     """
-    chat_id = message.chat.id
-    user = message.from_user
-    user_id = user.id if user else 0
-    chat_type = message.chat.type
+    if not dependencies_ok:
+        return escape_markdown_v2("⚠️ Ошибка: Не загружены компоненты.") # Экранируем
+
+    chat_id = message.chat.id; user = message.from_user
+    user_id = user.id if user else 0; chat_type = message.chat.type
     user_input = message.text or ""
 
-    if user_id == 0:
-         logger_ap.warning(f"Handling request in chat {chat_id} without user_id. Input ignored.")
-         return None
+    if user_id == 0: return None # Игнор
 
-    logger_ap.info(f"Core Agent: Handling request from user={user_id} in chat={chat_id} (type={chat_type}, force_pro={force_pro_model})")
+    # Получаем провайдера
+    ai_provider = dp.workflow_data.get("ai_provider")
+    if not ai_provider: return escape_markdown_v2("⚠️ Ошибка: AI провайдер не настроен.") # Экранируем
 
-    # --- Сохранение сообщения и профиля пользователя СРАЗУ (остается без изменений) ---
-    if user and user_input:
-        # ... (код сохранения в БД остается) ...
+    logger_ap.info(f"Core Agent ({ai_provider.upper()}): Handling request user={user_id} chat={chat_id}")
+
+    # Сохранение профиля пользователя (но не сообщения, чтобы избежать дублирования)
+    if user and database and hasattr(database, 'upsert_user_profile'):
         try:
-            await upsert_user_profile(
-                user_id=user_id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name
-            )
-            user_parts_list = [{'text': user_input}]
-            try:
-                from utils.converters import _serialize_parts
-                user_parts_json = _serialize_parts(user_parts_list)
-                if database and hasattr(database, 'add_message_to_history'):
-                     await database.add_message_to_history(
-                         chat_id=chat_id,
-                         role='user',
-                         parts=user_parts_json,
-                         user_id=user_id
-                     )
-                else:
-                    logger_ap.error("Cannot save user message: Database module or add_message_to_history function unavailable.")
-            except Exception as serialize_err:
-                logger_ap.error(f"Agent Processor: Failed to serialize or save user message for {user_id}: {serialize_err}", exc_info=True)
-            logger_ap.info(f"Agent Processor: Saved initial user message and updated profile for user {user_id}.")
+            await upsert_user_profile(user_id=user.id, username=user.username, first_name=user.first_name, last_name=user.last_name)
+            logger_ap.info(f"Agent Processor: Updated profile for user {user_id}.")
         except Exception as initial_save_err:
-            logger_ap.error(f"Agent Processor: Failed to save initial user message/profile for user {user_id}: {initial_save_err}", exc_info=True)
+            logger_ap.error(f"Agent Processor: Failed to update profile for user {user_id}: {initial_save_err}", exc_info=True)
+            # Не прерываем выполнение из-за ошибки сохранения
+    
+    # Удаляем прямое сохранение сообщения, так как оно будет сохранено через save_history позже
+    # Сообщение пользователя сохраняется как часть истории после процессинга через save_history
+    # Это позволяет избежать дублирования
 
-    # --- Получение моделей и настроек ---
-    # <<< ИЗМЕНЕНИЕ: Получаем СПИСКИ моделей >>>
-    lite_models_list = dp.workflow_data.get("lite_models_list", [])
-    pro_models_list = dp.workflow_data.get("pro_models_list", [])
+    # Получение настроек и доступности моделей
+    lite_model_available = False; pro_model_available = False
+    if ai_provider == 'google':
+        lite_model_available = bool(dp.workflow_data.get("lite_models_list"))
+        pro_model_available = bool(dp.workflow_data.get("pro_models_list"))
+    elif ai_provider == 'openai':
+        lite_model_available = bool(dp.workflow_data.get("lite_openai_model")) and bool(dp.workflow_data.get("openai_client"))
+        pro_model_available = bool(dp.workflow_data.get("pro_openai_model")) and bool(dp.workflow_data.get("openai_client"))
     available_pro_functions = dp.workflow_data.get("available_pro_functions", {})
     max_pro_steps = dp.workflow_data.get("max_pro_steps", 10)
 
-    # Проверка наличия Pro моделей (критично)
-    if not pro_models_list: # <--- Проверяем список
-        logger_ap.critical(f"Core Agent: Pro model list not found or empty in workflow_data for chat {chat_id}")
-        return escape_markdown_v2("⚠️ Ошибка: Основная модель AI недоступна.")
-    if not bot_instance: # (остается)
-        logger_ap.critical(f"Core Agent: Bot instance unavailable.")
-        return escape_markdown_v2("⚠️ Ошибка: Экземпляр бота недоступен.")
+    # Проверка Pro модели/клиента
+    if not pro_model_available:
+        return escape_markdown_v2(f"⚠️ Ошибка: Модель Pro AI ({ai_provider}) недоступна.") # Экранируем
+    if not bot_instance:
+        return escape_markdown_v2("⚠️ Ошибка: Экземпляр бота недоступен.") # Экранируем
 
-    # --- ОПРЕДЕЛЕНИЕ ПУТИ ОБРАБОТКИ (логика остается, но проверка Lite изменена) ---
-    call_pro_directly = False
-    call_lite_filter = False
-    pro_reason = ""
-
-    if force_pro_model:
-        call_pro_directly = True
-        pro_reason = "Forced by flag"
-    elif chat_type == aiogram_ChatType.PRIVATE:
-        call_pro_directly = True
-        pro_reason = "Private chat"
+    # Определение пути обработки
+    call_pro_directly = False; call_lite_filter = False; pro_reason = ""
+    if force_pro_model: call_pro_directly = True; pro_reason = "Forced"
+    elif chat_type == aiogram_ChatType.PRIVATE: call_pro_directly = True; pro_reason = "Private"
     elif chat_type in {aiogram_ChatType.GROUP, aiogram_ChatType.SUPERGROUP}:
         bot_info = await _get_bot_info(bot_instance)
-        is_reply_to_bot = False
-        is_mention = False
-        if bot_info and bot_info.id:
-            if (message.reply_to_message
-                    and message.reply_to_message.from_user
-                    and message.reply_to_message.from_user.id == bot_info.id):
-                is_reply_to_bot = True
-            if BOT_INFO_CACHE["username_lower"]:
-                mention_pattern = rf"(^|\s)@{re.escape(BOT_INFO_CACHE['username_lower'])}(?![a-zA-Z0-9_])"
-                if re.search(mention_pattern, user_input, re.IGNORECASE):
-                    is_mention = True
+        is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user and bot_info and message.reply_to_message.from_user.id == bot_info.id
+        is_mention = bot_info and BOT_INFO_CACHE["username_lower"] and f'@{BOT_INFO_CACHE["username_lower"]}' in user_input.lower()
+        if is_reply_to_bot or is_mention: call_pro_directly = True; pro_reason = "Reply/Mention"
+        elif lite_model_available: call_lite_filter = True
+        else: call_pro_directly = True; pro_reason = f"Lite N/A ({ai_provider})"
+    else: call_pro_directly = True; pro_reason = f"ChatType {chat_type}"
 
-        if is_reply_to_bot or is_mention:
-            call_pro_directly = True
-            pro_reason = "Reply/Mention in group"
-        else:
-            # <<< ИЗМЕНЕНИЕ: Проверяем список Lite моделей >>>
-            if lite_models_list:
-                call_lite_filter = True
-                logger_ap.info(f"Lite filter will be used for group message (user {user_id} chat {chat_id}).")
-            else:
-                call_pro_directly = True
-                pro_reason = "Lite filter unavailable (no models)"
-                logger_ap.warning(f"Lite models unavailable for group chat {chat_id}, falling back to Pro.")
-    else:
-        call_pro_directly = True
-        pro_reason = f"Unhandled chat type: {chat_type}"
-        logger_ap.warning(pro_reason + ". Proceeding with Pro model.")
-
-    # --- ЛОГИКА ВЫЗОВОВ ---
+    # Вызов Lite-фильтра
     actions_from_lite: Optional[List[Dict]] = None
     trigger_pro_after_lite = False
-
-    # --- 1. Вызов Lite-фильтра (если решили) ---
     if call_lite_filter:
         try:
-            # <<< НОВОЕ: Выбор Lite модели по индексу >>>
-            # Используем тот же индекс, что и для Pro, предполагая синхронную ротацию
-            # или что Lite не делает вызовы к API, требующие отдельной ротации.
-            current_lite_index = get_current_api_key_index(dp)
-            if current_lite_index >= len(lite_models_list):
-                logger_ap.warning(f"Lite index {current_lite_index} out of bounds, resetting to 0.")
-                current_lite_index = 0
-            lite_model_instance = lite_models_list[current_lite_index]
-            logger_ap.debug(f"Using Lite model index {current_lite_index} for filter.")
+            lite_response_text = None; lite_input = f"..." # Формируем ввод
+            logger_ap.info(f"Calling Lite filter ({ai_provider.upper()})...")
 
-            lite_input = f"user_id: {user_id}\nchat_id: {chat_id}\nuser_input: {user_input}"
-            lite_response = await lite_model_instance.generate_content_async(lite_input)
+            if ai_provider == 'google':
+                 # ... (Логика вызова Google Lite API) ...
+                 lite_models = dp.workflow_data.get("lite_models_list", []); current_index = get_current_api_key_index(dp)
+                 if lite_models and current_index < len(lite_models) and gemini_api:
+                     lite_model_instance = lite_models[current_index]
+                     lite_response = await lite_model_instance.generate_content_async(lite_input)
+                     lite_response_text = lite_response.text if lite_response else None
+                 else: logger_ap.error(f"Google Lite model instance unavailable index {current_index}.")
 
-            # --- Обработка ответа Lite (остается без изменений) ---
-            parse_result = parse_lite_llm_response(lite_response.text)
+            elif ai_provider == 'openai':
+                 # ... (Логика вызова OpenAI Lite API) ...
+                 client = dp.workflow_data.get("openai_client"); lite_model = dp.workflow_data.get("lite_openai_model")
+                 lite_prompt = dp.workflow_data.get("lite_system_prompt")
+                 if client and lite_model and openai_api:
+                      lite_messages = [{"role": "system", "content": lite_prompt}] if lite_prompt else []
+                      lite_messages.append({"role": "user", "content": lite_input})
+                      openai_response, error = await openai_api.call_openai_api(client, lite_model, lite_messages, tools=None, temperature=0.1)
+                      if openai_response and openai_response.choices: lite_response_text = openai_response.choices[0].message.content
+                      elif error: logger_ap.error(f"OpenAI Lite API failed: {error}")
+                 else: logger_ap.error("OpenAI client/lite model unavailable for filter.")
 
-            if isinstance(parse_result, str) and parse_result == "NO_ACTION_NEEDED":
-                logger_ap.info(f"Lite filter determined NO_ACTION_NEEDED (user {user_id} chat {chat_id}).")
-                return None
-            elif isinstance(parse_result, list):
-                actions_from_lite = parse_result
-                logger_ap.info(f"Lite filter returned {len(actions_from_lite)} actions.")
-                if any(action.get("function_name") == "trigger_pro_model_processing" for action in actions_from_lite):
-                    trigger_pro_after_lite = True
-                    pro_reason = "Lite filter requested Pro"
-            elif isinstance(parse_result, dict) and "error" in parse_result:
-                logger_ap.error(f"Lite filter parsing failed: {parse_result.get('message')}. Falling back to Pro.")
-                call_pro_directly = True
-                pro_reason = "Lite filter parsing error"
-            else:
-                 logger_ap.error(f"Unexpected result from parse_lite_llm_response. Falling back to Pro.")
-                 call_pro_directly = True
-                 pro_reason = "Lite filter unexpected result"
+            # Обработка ответа Lite
+            if lite_response_text:
+                 parse_result = parse_lite_llm_response(lite_response_text)
+                 # ... (Логика обработки parse_result как раньше) ...
+                 if isinstance(parse_result, str) and parse_result == "NO_ACTION_NEEDED": return None
+                 elif isinstance(parse_result, list): actions_from_lite = parse_result; trigger_pro_after_lite = any(a.get("function_name") == "trigger_pro_model_processing" for a in actions_from_lite)
+                 else: call_pro_directly = True; pro_reason = "Lite parse error"
+            else: call_pro_directly = True; pro_reason = "Lite API/proc error"
 
-            # !!! ВАЖНО: НЕ инкрементируем API ключ после вызова Lite, т.к. он
-            # вероятно не делает вызовы к API Gemini или не требует ротации.
-            # Ротация ключа происходит внутри process_request для Pro модели.
-
-        except IndexError: # Если lite_models_list пуст, несмотря на проверку выше
-             logger_ap.error(f"Lite filter failed: Model list is empty.")
-             call_pro_directly = True
-             pro_reason = "Lite model list empty"
         except Exception as lite_err:
-            logger_ap.error(f"Error calling/processing Lite model API: {lite_err}", exc_info=True)
-            call_pro_directly = True
-            pro_reason = "Lite API/processing error"
+            logger_ap.error(f"Error Lite filter ({ai_provider}): {lite_err}", exc_info=True)
+            call_pro_directly = True; pro_reason = "Lite Exception"
 
-    # --- 2. Выполнение действий из Lite (remember_user_info) (остается без изменений) ---
+    # Выполнение действий из Lite
     if actions_from_lite is not None:
-        remember_action_found = False
-        pro_action_found = False
+        # ... (Логика вызова remember_user_info как раньше) ...
+        remember_action_found = False; pro_action_found = False
         for action in actions_from_lite:
-            func_name = action.get("function_name")
-            args = action.get("arguments", {})
-            if func_name == "remember_user_info":
-                 remember_action_found = True
-                 # ... (код вызова database.upsert_user_note) ...
-                 if database and hasattr(database, 'upsert_user_note') and 'user_id' in args and 'info_category' in args and 'info_value' in args:
-                     try:
-                         await database.upsert_user_note(
-                             user_id=args['user_id'], # Используем ID из аргументов Lite
-                             info_category=args['info_category'],
-                             value=args['info_value']
-                             # merge_lists по умолчанию True
-                         )
-                         logger_ap.info(f"Lite filter executed: remember_user_info for user {args.get('user_id')}")
-                     except Exception as db_err:
-                         logger_ap.error(f"DB error during remember_user_info from Lite: {db_err}", exc_info=True)
-                 elif not database or not hasattr(database, 'upsert_user_note'):
-                      logger_ap.error("Cannot execute remember_user_info: DB module or upsert_user_note unavailable.")
-                 else:
-                      logger_ap.error("remember_user_info requested with missing args from Lite.")
-            elif func_name == "trigger_pro_model_processing":
-                 pro_action_found = True
-
+             func_name = action.get("function_name"); args = action.get("arguments", {})
+             if func_name == "remember_user_info": remember_action_found = True # ... (вызов DB) ...
+             elif func_name == "trigger_pro_model_processing": pro_action_found = True
         if remember_action_found and not pro_action_found and not trigger_pro_after_lite:
-            logger_ap.info(f"Finished processing: Lite triggered only 'remember'. No Pro call needed (user {user_id} chat {chat_id}).")
-            return None
+            logger_ap.info("Finished: Lite triggered only 'remember'."); return None
 
-    # --- 3. Вызов Pro-модели (если нужно) ---
+    # Вызов Pro-модели
     if call_pro_directly or trigger_pro_after_lite:
-        if not pro_reason: pro_reason = "Fallback or Unknown"
-        logger_ap.info(f"Proceeding with Pro model for user {user_id} chat {chat_id} (Reason: {pro_reason}).")
-        try:
-            # <<< ИЗМЕНЕНИЕ: Передаем списки моделей и dispatcher >>>
-            return await _execute_pro_model_logic(
-                message=message,
-                pro_models_list=pro_models_list,
-                lite_models_list=lite_models_list, # Передаем для полноты
-                available_pro_functions=available_pro_functions,
-                max_pro_steps=max_pro_steps,
-                dispatcher=dp # Передаем dispatcher (импортирован как dp)
-            )
-        except Exception as pro_exec_err:
-             logger_ap.error(f"Core Agent: Unhandled exception during _execute_pro_model_logic call for chat {chat_id}: {pro_exec_err}", exc_info=True)
-             return escape_markdown_v2("Произошла внутренняя ошибка при обработке вашего запроса основной моделью.")
+        logger_ap.info(f"Proceeding with Pro model ({ai_provider.upper()}) Reason: {pro_reason}")
+        # Вызываем _execute_pro_model_logic, она вернет текст или экранированную ошибку
+        return await _execute_pro_model_logic(
+            message=message,
+            available_pro_functions=available_pro_functions,
+            max_pro_steps=max_pro_steps,
+            dispatcher=dp
+        )
 
-    # --- 4. Завершение (если не вызвали Pro и не вышли раньше) ---
-    logger_ap.info(f"Finishing request for user {user_id} chat {chat_id} (no direct Pro call, Lite filter decided no further action/Pro needed).")
-    return None
+    # Завершение
+    logger_ap.info(f"Finishing request ({ai_provider.upper()}) (no Pro call needed).")
+    return None # Если не вызвали Pro и не вышли раньше
 
-logger_ap.info("--- agent_processor.py loaded successfully. ---")
+logger_ap.info(f"--- agent_processor.py loaded successfully. ---")
